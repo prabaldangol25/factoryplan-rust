@@ -307,14 +307,14 @@ impl BayPool {
 
 /// Run the backward-scheduling algorithm.
 pub fn run_schedule(input: &ScheduleInput) -> ScheduleOutput {
-    run_schedule_with_lt(input, |lt| lt) // identity transform
+    run_schedule_with_lt(input, |_pid, lt| lt) // identity transform
 }
 
-/// Run scheduling with an optional lead-time transformation.
-/// Used by Phase 3 recommendations (e.g. uniform % reduction).
+/// Run scheduling with an optional per-product lead-time transformation.
+/// Used by Phase 3 recommendations (e.g. uniform % reduction, per-product overrides).
 pub fn run_schedule_with_lt<F>(input: &ScheduleInput, mut lt_transform: F) -> ScheduleOutput
 where
-    F: FnMut(i64) -> i64,
+    F: FnMut(&str, i64) -> i64,
 {
     let lt_index = LtIndex::new(&input.products);
 
@@ -331,7 +331,7 @@ where
         let dates = explode_due_dates(d);
         for due in dates {
             let raw_lt = lt_index.lookup(&d.product_id, due).unwrap_or(0);
-            let lt = lt_transform(raw_lt).max(1);
+            let lt = lt_transform(&d.product_id, raw_lt).max(1);
             let req_start = due - Duration::days(lt - 1); // inclusive: lt days = [due-lt+1, due]
             units.push(U {
                 demand_id: d.id.clone(),
