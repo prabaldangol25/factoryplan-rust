@@ -235,6 +235,8 @@ impl LtIndex {
 pub struct Bay {
     /// Sorted by start. Each interval is [start, end] inclusive.
     intervals: Vec<(NaiveDate, NaiveDate)>,
+    /// Cached running total of reserved days across intervals (for load-balancing).
+    reserved_days: i64,
 }
 
 impl Bay {
@@ -250,12 +252,17 @@ impl Bay {
     }
 
     pub fn reserve(&mut self, start: NaiveDate, end: NaiveDate) {
-        // insert sorted by start
         let pos = self
             .intervals
             .binary_search_by(|(s, _)| s.cmp(&start))
             .unwrap_or_else(|p| p);
         self.intervals.insert(pos, (start, end));
+        self.reserved_days += (end - start).num_days() + 1;
+    }
+
+    /// Total reserved bay-days. Used for load-balanced placement.
+    pub fn reserved_days(&self) -> i64 {
+        self.reserved_days
     }
 }
 
@@ -288,14 +295,37 @@ impl BayPool {
         BayPool { bays }
     }
 
-    /// Find first bay (by pool order) free in [start, end]. Returns index into `bays`.
+    /// Find the **least-loaded** bay free in [start, end]. Returns index into
+    /// `bays`. This spreads demand across factories and across bays within a
+    /// factory, rather than always piling on the first bay.
+    ///
+    /// Ranking is:
+    ///   1. lowest per-factory total reserved days  (split across factories)
+    ///   2. lowest per-bay reserved days            (split within a factory)
+    ///   3. lowest pool index                       (deterministic tiebreak)
     pub fn find_free(&self, start: NaiveDate, end: NaiveDate) -> Option<usize> {
+        // Precompute total load per factory once per call.
+        let mut factory_load: std::collections::HashMap<&str, i64> =
+            std::collections::HashMap::new();
+        for b in &self.bays {
+            *factory_load.entry(b.factory_id.as_str()).or_insert(0) += b.bay.reserved_days();
+        }
+
+        let mut best: Option<(i64, i64, usize)> = None; // (factory_load, bay_load, idx)
         for (i, b) in self.bays.iter().enumerate() {
-            if b.bay.is_free(start, end) {
-                return Some(i);
+            if !b.bay.is_free(start, end) {
+                continue;
+            }
+            let fl = factory_load.get(b.factory_id.as_str()).copied().unwrap_or(0);
+            let bl = b.bay.reserved_days();
+            let key = (fl, bl, i);
+            match best {
+                None => best = Some(key),
+                Some(cur) if key < cur => best = Some(key),
+                _ => {}
             }
         }
-        None
+        best.map(|(_, _, i)| i)
     }
 
     pub fn reserve(&mut self, idx: usize, start: NaiveDate, end: NaiveDate) {
@@ -508,6 +538,85 @@ mod tests {
         assert_eq!(u.required_start, ymd(2026, 9, 26)); // 5-day LT inclusive: 26..30 = 5 days
         assert_eq!(u.factory_id.as_deref(), Some("f1"));
         assert_eq!(u.bay_index, Some(0));
+    }
+
+    #[test]
+    fn demand_spreads_across_factories() {
+        // 2 factories, 2 bays each. 10 units evenly spread over Q3.
+        // With load-balanced placement, both factories should get units.
+        let s = ScheduleInput {
+            factories: vec![
+                FactoryInput { id: "fA".into(), name: "A".into(), bays: 2 },
+                FactoryInput { id: "fB".into(), name: "B".into(), bays: 2 },
+            ],
+            products: vec![ProductInput {
+                id: "p1".into(),
+                name: "P".into(),
+                lead_times: vec![LeadTimeInput { year: 2026, quarter: 3, lead_time_days: 5 }],
+            }],
+            demand: vec![DemandInput {
+                id: "d1".into(),
+                product_id: "p1".into(),
+                period_type: "quarter".into(),
+                year: 2026,
+                period_index: 3,
+                quantity: 10,
+                spread_mode: "even".into(),
+            }],
+        };
+        let out = run_schedule(&s);
+        assert_eq!(out.shipped_on_time, 10);
+        let mut count_a: i64 = 0;
+        let mut count_b: i64 = 0;
+        for u in &out.units {
+            match u.factory_id.as_deref() {
+                Some("fA") => count_a += 1,
+                Some("fB") => count_b += 1,
+                _ => {}
+            }
+        }
+        assert!(count_a > 0, "Factory A should receive units, got {count_a}");
+        assert!(count_b > 0, "Factory B should receive units, got {count_b}");
+        // Should be roughly balanced (each factory carries ~half)
+        let diff = (count_a - count_b).abs();
+        assert!(
+            diff <= 2,
+            "factories should be balanced; got A={count_a}, B={count_b}"
+        );
+    }
+
+    #[test]
+    fn demand_spreads_across_bays_within_factory() {
+        // Single factory, 4 bays. 8 units evenly spread. Every bay should be used.
+        let s = ScheduleInput {
+            factories: vec![FactoryInput { id: "f1".into(), name: "F1".into(), bays: 4 }],
+            products: vec![ProductInput {
+                id: "p1".into(),
+                name: "P".into(),
+                lead_times: vec![LeadTimeInput { year: 2026, quarter: 3, lead_time_days: 5 }],
+            }],
+            demand: vec![DemandInput {
+                id: "d1".into(),
+                product_id: "p1".into(),
+                period_type: "quarter".into(),
+                year: 2026,
+                period_index: 3,
+                quantity: 8,
+                spread_mode: "even".into(),
+            }],
+        };
+        let out = run_schedule(&s);
+        assert_eq!(out.shipped_on_time, 8);
+        let mut bay_counts = [0i64; 4];
+        for u in &out.units {
+            if let Some(b) = u.bay_index {
+                bay_counts[b as usize] += 1;
+            }
+        }
+        // All 4 bays should have at least one unit
+        for (i, &c) in bay_counts.iter().enumerate() {
+            assert!(c > 0, "bay {i} unused; counts = {bay_counts:?}");
+        }
     }
 
     #[test]
