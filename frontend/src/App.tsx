@@ -6,6 +6,7 @@ import {
   ListChecks,
   Play,
   BarChart3,
+  Download,
 } from 'lucide-react'
 import * as api from './api'
 import type { Demand, Factory, Product, RunResult, Scenario } from './types'
@@ -174,6 +175,22 @@ function ResultsTab({ result, context, onGoToRun }: ResultsTabProps) {
   }
   return (
     <div className="space-y-6">
+      <div className="flex items-center justify-end gap-2">
+        <a
+          href={api.exportRunCsvUrl(result.run.id)}
+          className="inline-flex items-center gap-1 px-3 py-1.5 border border-slate-300 bg-white text-slate-700 text-sm rounded hover:bg-slate-50"
+        >
+          <Download className="w-4 h-4" />
+          CSV
+        </a>
+        <a
+          href={api.exportRunXlsxUrl(result.run.id)}
+          className="inline-flex items-center gap-1 px-3 py-1.5 border border-slate-300 bg-white text-slate-700 text-sm rounded hover:bg-slate-50"
+        >
+          <Download className="w-4 h-4" />
+          XLSX
+        </a>
+      </div>
       <RecommendationPanel
         recommendation={result.recommendation}
         totalDemand={result.run.total_demand}

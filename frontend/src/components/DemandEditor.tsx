@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Plus, Trash2 } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Plus, Trash2, Upload } from 'lucide-react'
 import type { Demand, PeriodType, Product, SpreadMode } from '../types'
 import * as api from '../api'
 
@@ -25,6 +25,8 @@ export function DemandEditor({ scenarioId }: Props) {
   const [demand, setDemand] = useState<Demand[]>([])
   const [products, setProducts] = useState<Product[]>([])
   const [error, setError] = useState<string | null>(null)
+  const [importResult, setImportResult] = useState<{ inserted: number; skipped: number; errors: string[] } | null>(null)
+  const fileRef = useRef<HTMLInputElement>(null)
 
   const [form, setForm] = useState<NewDemandForm>(() => ({
     product_id: '',
@@ -71,6 +73,18 @@ export function DemandEditor({ scenarioId }: Props) {
     }
   }
 
+  async function handleImport(file: File) {
+    try {
+      setError(null)
+      setImportResult(null)
+      const r = await api.importDemandExcel(scenarioId, file)
+      setImportResult(r)
+      await reload()
+    } catch (e: unknown) {
+      setError(((e as { message?: string }).message) ?? 'import failed')
+    }
+  }
+
   async function handleDelete(id: string) {
     if (!confirm('Delete demand row?')) return
     try {
@@ -89,6 +103,52 @@ export function DemandEditor({ scenarioId }: Props) {
   return (
     <div className="space-y-4">
       {error && <div className="text-sm text-rose-600">{error}</div>}
+
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="text-sm text-slate-600">
+          {demand.length} row{demand.length !== 1 && 's'} ·{' '}
+          {demand.reduce((s, d) => s + d.quantity, 0)} units
+        </div>
+        <div>
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".xlsx,.xls"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0]
+              if (f) void handleImport(f)
+              if (fileRef.current) fileRef.current.value = ''
+            }}
+          />
+          <button
+            className="inline-flex items-center gap-1 px-3 py-1.5 border border-slate-300 bg-white text-slate-700 text-sm rounded hover:bg-slate-50"
+            onClick={() => fileRef.current?.click()}
+          >
+            <Upload className="w-4 h-4" />
+            Import Excel
+          </button>
+        </div>
+      </div>
+
+      {importResult && (
+        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm">
+          <div className="font-medium">
+            Imported {importResult.inserted} row{importResult.inserted !== 1 && 's'},{' '}
+            skipped {importResult.skipped}.
+          </div>
+          {importResult.errors.length > 0 && (
+            <ul className="mt-2 list-disc list-inside text-rose-700 text-xs space-y-0.5">
+              {importResult.errors.slice(0, 10).map((e, i) => (
+                <li key={i}>{e}</li>
+              ))}
+              {importResult.errors.length > 10 && (
+                <li>…and {importResult.errors.length - 10} more</li>
+              )}
+            </ul>
+          )}
+        </div>
+      )}
 
       <div className="rounded-lg border border-slate-200 bg-white overflow-hidden">
         <table className="min-w-full text-sm">

@@ -151,3 +151,32 @@ export async function deleteDemand(id: string): Promise<void> {
 export async function runScenario(scenarioId: string): Promise<RunResult> {
   return client.post(`/api/scenarios/${scenarioId}/run`).then((r) => r.data).catch(rethrow)
 }
+
+// ---------- import / export (Phase 5) ----------
+export interface ImportResult {
+  inserted: number
+  skipped: number
+  errors: string[]
+}
+
+export async function importDemandExcel(
+  scenarioId: string,
+  file: File,
+): Promise<ImportResult> {
+  const form = new FormData()
+  form.append('file', file)
+  return axios
+    .post(`/api/scenarios/${scenarioId}/demand/import-excel`, form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+    .then((r) => r.data)
+    .catch(rethrow)
+}
+
+export function exportRunCsvUrl(runId: string): string {
+  return `/api/runs/${runId}/export.csv`
+}
+
+export function exportRunXlsxUrl(runId: string): string {
+  return `/api/runs/${runId}/export.xlsx`
+}
