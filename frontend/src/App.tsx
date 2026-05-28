@@ -201,7 +201,12 @@ function ResultsTab({ result, context, onGoToRun }: ResultsTabProps) {
       />
       <section>
         <h3 className="text-sm font-semibold text-slate-700 mb-2">Shipment summary</h3>
-        <ShipmentSummary result={result} demand={context.demand} products={context.products} />
+        <ShipmentSummary
+          result={result}
+          demand={context.demand}
+          products={context.products}
+          factories={context.factories}
+        />
       </section>
       <section>
         <h3 className="text-sm font-semibold text-slate-700 mb-2">Gantt by factory</h3>
