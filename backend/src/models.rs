@@ -25,6 +25,7 @@ pub struct UpdateScenario {
 
 // ---------- Factory ----------
 
+/// Raw `factory` row (used internally and during scenario cloning).
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct Factory {
     pub id: String,
@@ -33,16 +34,46 @@ pub struct Factory {
     pub bays: i64,
 }
 
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct BayCountRow {
+    pub id: String,
+    pub factory_id: String,
+    pub year: i64,
+    pub quarter: i64,
+    pub bays: i64,
+}
+
+/// Composite Factory returned to API clients — base bays + per-quarter overrides.
+#[derive(Debug, Clone, Serialize)]
+pub struct FactoryWithBayCounts {
+    pub id: String,
+    pub scenario_id: String,
+    pub name: String,
+    pub bays: i64,
+    pub bay_counts: Vec<BayCountRow>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BayCountInput {
+    pub year: i64,
+    pub quarter: i64,
+    pub bays: i64,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CreateFactory {
     pub name: String,
     pub bays: i64,
+    #[serde(default)]
+    pub bay_counts: Vec<BayCountInput>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateFactory {
     pub name: String,
     pub bays: i64,
+    #[serde(default)]
+    pub bay_counts: Vec<BayCountInput>,
 }
 
 // ---------- Product + lead times ----------

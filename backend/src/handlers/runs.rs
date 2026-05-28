@@ -6,7 +6,8 @@ use crate::error::{AppError, AppResult};
 use crate::models::*;
 use crate::recommendations::{compute_recommendations, RecommendationOut};
 use crate::scheduling::{
-    run_schedule, DemandInput, FactoryInput, LeadTimeInput, ProductInput, ScheduleInput,
+    run_schedule, BayCountInput, DemandInput, FactoryInput, LeadTimeInput, ProductInput,
+    ScheduleInput,
 };
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
@@ -24,13 +25,35 @@ pub(crate) async fn load_schedule_input(
     pool: &Pool,
     scenario_id: &str,
 ) -> AppResult<ScheduleInput> {
-    // factories
-    let factories = sqlx::query_as::<_, Factory>(
+    // factories + per-quarter bay-count overrides
+    let factory_rows = sqlx::query_as::<_, Factory>(
         "SELECT id, scenario_id, name, bays FROM factory WHERE scenario_id = ? ORDER BY name",
     )
     .bind(scenario_id)
     .fetch_all(pool)
     .await?;
+    let mut factories: Vec<FactoryInput> = Vec::with_capacity(factory_rows.len());
+    for f in factory_rows {
+        let bcs = sqlx::query_as::<_, BayCountRow>(
+            "SELECT id, factory_id, year, quarter, bays FROM factory_bay_count WHERE factory_id = ?",
+        )
+        .bind(&f.id)
+        .fetch_all(pool)
+        .await?;
+        factories.push(FactoryInput {
+            id: f.id,
+            name: f.name,
+            bays: f.bays,
+            bay_counts_by_quarter: bcs
+                .into_iter()
+                .map(|b| BayCountInput {
+                    year: b.year,
+                    quarter: b.quarter,
+                    bays: b.bays,
+                })
+                .collect(),
+        });
+    }
 
     // products + lead times
     let products_rows = sqlx::query_as::<_, ProductRow>(
@@ -70,14 +93,7 @@ pub(crate) async fn load_schedule_input(
     .await?;
 
     Ok(ScheduleInput {
-        factories: factories
-            .into_iter()
-            .map(|f| FactoryInput {
-                id: f.id,
-                name: f.name,
-                bays: f.bays,
-            })
-            .collect(),
+        factories,
         products,
         demand: demand_rows
             .into_iter()

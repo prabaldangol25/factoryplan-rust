@@ -47,7 +47,7 @@ async fn create_scenario(
 
     // Clone children if requested
     if let Some(src_id) = &body.clone_from {
-        // factories
+        // factories + per-quarter bay-count overrides
         let factories = sqlx::query_as::<_, Factory>(
             "SELECT id, scenario_id, name, bays FROM factory WHERE scenario_id = ?",
         )
@@ -55,13 +55,30 @@ async fn create_scenario(
         .fetch_all(&mut *tx)
         .await?;
         for f in factories {
+            let new_fid = new_id();
             sqlx::query("INSERT INTO factory (id, scenario_id, name, bays) VALUES (?, ?, ?, ?)")
-                .bind(new_id())
+                .bind(&new_fid)
                 .bind(&id)
                 .bind(&f.name)
                 .bind(f.bays)
                 .execute(&mut *tx)
                 .await?;
+            let bcs = sqlx::query_as::<_, BayCountRow>(
+                "SELECT id, factory_id, year, quarter, bays FROM factory_bay_count WHERE factory_id = ?",
+            )
+            .bind(&f.id)
+            .fetch_all(&mut *tx)
+            .await?;
+            for bc in bcs {
+                sqlx::query("INSERT INTO factory_bay_count (id, factory_id, year, quarter, bays) VALUES (?, ?, ?, ?, ?)")
+                    .bind(new_id())
+                    .bind(&new_fid)
+                    .bind(bc.year)
+                    .bind(bc.quarter)
+                    .bind(bc.bays)
+                    .execute(&mut *tx)
+                    .await?;
+            }
         }
 
         // products + lead times (need id remap)

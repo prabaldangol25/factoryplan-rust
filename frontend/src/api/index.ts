@@ -69,15 +69,34 @@ export async function listFactories(scenarioId: string): Promise<Factory[]> {
   return client.get(`/api/scenarios/${scenarioId}/factories`).then((r) => r.data).catch(rethrow)
 }
 
-export async function createFactory(scenarioId: string, name: string, bays: number): Promise<Factory> {
+export interface BayCountInput {
+  year: number
+  quarter: number
+  bays: number
+}
+
+export async function createFactory(
+  scenarioId: string,
+  name: string,
+  bays: number,
+  bay_counts: BayCountInput[] = [],
+): Promise<Factory> {
   return client
-    .post(`/api/scenarios/${scenarioId}/factories`, { name, bays })
+    .post(`/api/scenarios/${scenarioId}/factories`, { name, bays, bay_counts })
     .then((r) => r.data)
     .catch(rethrow)
 }
 
-export async function updateFactory(id: string, name: string, bays: number): Promise<Factory> {
-  return client.put(`/api/factories/${id}`, { name, bays }).then((r) => r.data).catch(rethrow)
+export async function updateFactory(
+  id: string,
+  name: string,
+  bays: number,
+  bay_counts: BayCountInput[] = [],
+): Promise<Factory> {
+  return client
+    .put(`/api/factories/${id}`, { name, bays, bay_counts })
+    .then((r) => r.data)
+    .catch(rethrow)
 }
 
 export async function deleteFactory(id: string): Promise<void> {

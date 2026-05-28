@@ -11,6 +11,44 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .service(delete_factory);
 }
 
+async fn bay_counts_for(pool: &Pool, factory_id: &str) -> Result<Vec<BayCountRow>, sqlx::Error> {
+    sqlx::query_as::<_, BayCountRow>(
+        "SELECT id, factory_id, year, quarter, bays FROM factory_bay_count WHERE factory_id = ? ORDER BY year, quarter",
+    )
+    .bind(factory_id)
+    .fetch_all(pool)
+    .await
+}
+
+fn validate_bay_counts(items: &[BayCountInput]) -> Result<(), AppError> {
+    for c in items {
+        if !(1..=4).contains(&c.quarter) {
+            return Err(AppError::BadRequest(format!(
+                "quarter must be 1..=4 (got {})",
+                c.quarter
+            )));
+        }
+        if c.bays < 0 {
+            return Err(AppError::BadRequest(format!(
+                "bay_counts.bays must be >= 0 (got {})",
+                c.bays
+            )));
+        }
+    }
+    Ok(())
+}
+
+async fn as_with_bays(pool: &Pool, f: Factory) -> AppResult<FactoryWithBayCounts> {
+    let bay_counts = bay_counts_for(pool, &f.id).await?;
+    Ok(FactoryWithBayCounts {
+        id: f.id,
+        scenario_id: f.scenario_id,
+        name: f.name,
+        bays: f.bays,
+        bay_counts,
+    })
+}
+
 #[get("/api/scenarios/{id}/factories")]
 async fn list_factories(
     pool: web::Data<Pool>,
@@ -23,7 +61,11 @@ async fn list_factories(
     .bind(&scenario_id)
     .fetch_all(pool.get_ref())
     .await?;
-    Ok(HttpResponse::Ok().json(rows))
+    let mut out: Vec<FactoryWithBayCounts> = Vec::with_capacity(rows.len());
+    for f in rows {
+        out.push(as_with_bays(pool.get_ref(), f).await?);
+    }
+    Ok(HttpResponse::Ok().json(out))
 }
 
 #[post("/api/scenarios/{id}/factories")]
@@ -40,21 +82,36 @@ async fn create_factory(
     if body.bays < 0 {
         return Err(AppError::BadRequest("bays must be >= 0".into()));
     }
+    validate_bay_counts(&body.bay_counts)?;
     let id = new_id();
+
+    let mut tx = pool.begin().await?;
     sqlx::query("INSERT INTO factory (id, scenario_id, name, bays) VALUES (?, ?, ?, ?)")
         .bind(&id)
         .bind(&scenario_id)
         .bind(name)
         .bind(body.bays)
-        .execute(pool.get_ref())
+        .execute(&mut *tx)
         .await?;
+    for c in &body.bay_counts {
+        sqlx::query("INSERT INTO factory_bay_count (id, factory_id, year, quarter, bays) VALUES (?, ?, ?, ?, ?)")
+            .bind(new_id())
+            .bind(&id)
+            .bind(c.year)
+            .bind(c.quarter)
+            .bind(c.bays)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+
     let row = sqlx::query_as::<_, Factory>(
         "SELECT id, scenario_id, name, bays FROM factory WHERE id = ?",
     )
     .bind(&id)
     .fetch_one(pool.get_ref())
     .await?;
-    Ok(HttpResponse::Created().json(row))
+    Ok(HttpResponse::Created().json(as_with_bays(pool.get_ref(), row).await?))
 }
 
 #[put("/api/factories/{id}")]
@@ -71,22 +128,43 @@ async fn update_factory(
     if body.bays < 0 {
         return Err(AppError::BadRequest("bays must be >= 0".into()));
     }
+    validate_bay_counts(&body.bay_counts)?;
+
+    let mut tx = pool.begin().await?;
     let res = sqlx::query("UPDATE factory SET name = ?, bays = ? WHERE id = ?")
         .bind(name)
         .bind(body.bays)
         .bind(&id)
-        .execute(pool.get_ref())
+        .execute(&mut *tx)
         .await?;
     if res.rows_affected() == 0 {
         return Err(AppError::NotFound(format!("factory {id}")));
     }
+
+    // Replace per-quarter overrides wholesale
+    sqlx::query("DELETE FROM factory_bay_count WHERE factory_id = ?")
+        .bind(&id)
+        .execute(&mut *tx)
+        .await?;
+    for c in &body.bay_counts {
+        sqlx::query("INSERT INTO factory_bay_count (id, factory_id, year, quarter, bays) VALUES (?, ?, ?, ?, ?)")
+            .bind(new_id())
+            .bind(&id)
+            .bind(c.year)
+            .bind(c.quarter)
+            .bind(c.bays)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+
     let row = sqlx::query_as::<_, Factory>(
         "SELECT id, scenario_id, name, bays FROM factory WHERE id = ?",
     )
     .bind(&id)
     .fetch_one(pool.get_ref())
     .await?;
-    Ok(HttpResponse::Ok().json(row))
+    Ok(HttpResponse::Ok().json(as_with_bays(pool.get_ref(), row).await?))
 }
 
 #[delete("/api/factories/{id}")]

@@ -16,6 +16,17 @@ use std::collections::HashMap;
 pub struct FactoryInput {
     pub id: String,
     pub name: String,
+    /// Baseline bay count used for any quarter without an override.
+    pub bays: i64,
+    /// Per-(year, quarter) overrides. When present, overrides `bays` for that
+    /// specific quarter only.
+    pub bay_counts_by_quarter: Vec<BayCountInput>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BayCountInput {
+    pub year: i64,
+    pub quarter: i64,
     pub bays: i64,
 }
 
@@ -228,6 +239,100 @@ impl LtIndex {
     }
 }
 
+// ---------- Bay-count lookup (per (factory, quarter)) ----------
+
+/// Effective bay count per (factory, quarter), backed by a baseline.
+#[derive(Debug, Clone)]
+pub struct BayCountIndex {
+    /// factory_id -> baseline bays
+    baseline: HashMap<String, i64>,
+    /// factory_id -> (year, quarter) -> bays
+    overrides: HashMap<String, HashMap<(i64, i64), i64>>,
+}
+
+impl BayCountIndex {
+    pub fn new(factories: &[FactoryInput]) -> Self {
+        let mut baseline: HashMap<String, i64> = HashMap::new();
+        let mut overrides: HashMap<String, HashMap<(i64, i64), i64>> = HashMap::new();
+        for f in factories {
+            baseline.insert(f.id.clone(), f.bays.max(0));
+            let mut o: HashMap<(i64, i64), i64> = HashMap::new();
+            for bc in &f.bay_counts_by_quarter {
+                if (1..=4).contains(&bc.quarter) {
+                    o.insert((bc.year, bc.quarter), bc.bays.max(0));
+                }
+            }
+            if !o.is_empty() {
+                overrides.insert(f.id.clone(), o);
+            }
+        }
+        BayCountIndex { baseline, overrides }
+    }
+
+    /// Effective bay count for the factory in the given quarter. Override wins
+    /// over baseline; missing factory returns 0.
+    pub fn effective(&self, factory_id: &str, year: i64, quarter: i64) -> i64 {
+        if let Some(o) = self.overrides.get(factory_id) {
+            if let Some(&v) = o.get(&(year, quarter)) {
+                return v;
+            }
+        }
+        self.baseline.get(factory_id).copied().unwrap_or(0)
+    }
+
+    /// Maximum effective bay count across baseline and all defined overrides.
+    /// Used to size the bay pool so every quarter's needs can be represented.
+    pub fn max_for(&self, factory_id: &str) -> i64 {
+        let base = self.baseline.get(factory_id).copied().unwrap_or(0);
+        let omax = self
+            .overrides
+            .get(factory_id)
+            .and_then(|m| m.values().copied().max())
+            .unwrap_or(0);
+        base.max(omax)
+    }
+
+    /// Minimum effective bay count across every quarter touched by [start, end].
+    /// A bay slot with index `i` may be used only if `i < this value`.
+    pub fn min_in_window(
+        &self,
+        factory_id: &str,
+        start: NaiveDate,
+        end: NaiveDate,
+    ) -> i64 {
+        debug_assert!(start <= end);
+        let mut quarters: Vec<(i64, i64)> = Vec::new();
+        let mut d = start;
+        loop {
+            let key = (d.year() as i64, quarter_of(d));
+            if quarters.last() != Some(&key) {
+                quarters.push(key);
+            }
+            // Jump to the first day of the next month to walk forward cheaply
+            let nm_year = if d.month() == 12 { d.year() + 1 } else { d.year() };
+            let nm_month = if d.month() == 12 { 1 } else { d.month() + 1 };
+            let next = match NaiveDate::from_ymd_opt(nm_year, nm_month, 1) {
+                Some(v) => v,
+                None => break,
+            };
+            if next > end {
+                // capture end's quarter if not yet added
+                let key_end = (end.year() as i64, quarter_of(end));
+                if quarters.last() != Some(&key_end) {
+                    quarters.push(key_end);
+                }
+                break;
+            }
+            d = next;
+        }
+        quarters
+            .into_iter()
+            .map(|(y, q)| self.effective(factory_id, y, q))
+            .min()
+            .unwrap_or(0)
+    }
+}
+
 // ---------- Bay pool ----------
 
 /// A single bay tracks its reserved intervals (sorted, non-overlapping).
@@ -277,13 +382,19 @@ pub struct PoolBay {
 #[derive(Debug, Clone)]
 pub struct BayPool {
     pub bays: Vec<PoolBay>,
+    bay_counts: BayCountIndex,
 }
 
 impl BayPool {
     pub fn from_factories(factories: &[FactoryInput]) -> Self {
+        let bay_counts = BayCountIndex::new(factories);
         let mut bays = Vec::new();
         for f in factories {
-            for i in 0..f.bays.max(0) {
+            // Pool size = max over baseline and any per-quarter override, so the
+            // bay slot exists when it might be needed. Slots are gated by the
+            // per-window effective count in `find_free`.
+            let max_bays = bay_counts.max_for(&f.id).max(f.bays.max(0));
+            for i in 0..max_bays {
                 bays.push(PoolBay {
                     factory_id: f.id.clone(),
                     factory_name: f.name.clone(),
@@ -292,18 +403,30 @@ impl BayPool {
                 });
             }
         }
-        BayPool { bays }
+        BayPool { bays, bay_counts }
+    }
+
+    pub fn bay_counts(&self) -> &BayCountIndex {
+        &self.bay_counts
     }
 
     /// Find the **least-loaded** bay free in [start, end]. Returns index into
     /// `bays`. This spreads demand across factories and across bays within a
     /// factory, rather than always piling on the first bay.
     ///
+    /// Slots are also filtered to those that exist for the entire window —
+    /// i.e. `bay_index < bay_counts.min_in_window(factory, start, end)`. This
+    /// is what lets the bay count vary by quarter.
+    ///
     /// Ranking is:
     ///   1. lowest per-factory total reserved days  (split across factories)
     ///   2. lowest per-bay reserved days            (split within a factory)
     ///   3. lowest pool index                       (deterministic tiebreak)
     pub fn find_free(&self, start: NaiveDate, end: NaiveDate) -> Option<usize> {
+        // Cache the per-window factory cap so we compute it once per factory.
+        let mut window_cap: std::collections::HashMap<&str, i64> =
+            std::collections::HashMap::new();
+
         // Precompute total load per factory once per call.
         let mut factory_load: std::collections::HashMap<&str, i64> =
             std::collections::HashMap::new();
@@ -313,6 +436,13 @@ impl BayPool {
 
         let mut best: Option<(i64, i64, usize)> = None; // (factory_load, bay_load, idx)
         for (i, b) in self.bays.iter().enumerate() {
+            // Per-window bay-count gate
+            let cap = *window_cap
+                .entry(b.factory_id.as_str())
+                .or_insert_with(|| self.bay_counts.min_in_window(&b.factory_id, start, end));
+            if b.bay_index >= cap {
+                continue;
+            }
             if !b.bay.is_free(start, end) {
                 continue;
             }
@@ -493,6 +623,7 @@ mod tests {
                 id: "f1".into(),
                 name: "F1".into(),
                 bays: 1,
+                bay_counts_by_quarter: vec![],
             }],
             products: vec![ProductInput {
                 id: "p1".into(),
@@ -546,8 +677,8 @@ mod tests {
         // With load-balanced placement, both factories should get units.
         let s = ScheduleInput {
             factories: vec![
-                FactoryInput { id: "fA".into(), name: "A".into(), bays: 2 },
-                FactoryInput { id: "fB".into(), name: "B".into(), bays: 2 },
+                FactoryInput { id: "fA".into(), name: "A".into(), bays: 2, bay_counts_by_quarter: vec![] },
+                FactoryInput { id: "fB".into(), name: "B".into(), bays: 2, bay_counts_by_quarter: vec![] },
             ],
             products: vec![ProductInput {
                 id: "p1".into(),
@@ -589,7 +720,7 @@ mod tests {
     fn demand_spreads_across_bays_within_factory() {
         // Single factory, 4 bays. 8 units evenly spread. Every bay should be used.
         let s = ScheduleInput {
-            factories: vec![FactoryInput { id: "f1".into(), name: "F1".into(), bays: 4 }],
+            factories: vec![FactoryInput { id: "f1".into(), name: "F1".into(), bays: 4, bay_counts_by_quarter: vec![] }],
             products: vec![ProductInput {
                 id: "p1".into(),
                 name: "P".into(),
@@ -620,6 +751,116 @@ mod tests {
     }
 
     #[test]
+    fn variable_bays_shrinking_quarter_limits_capacity() {
+        // Factory has baseline of 4 bays, but Q3 2026 is overridden to 1 bay.
+        // 4 units due in Q3 (5-day LT, non-overlapping windows) — with 1 bay
+        // available, all 4 still fit sequentially. Add a 5th unit competing for
+        // the same exact window and that one becomes unshippable.
+        let s = ScheduleInput {
+            factories: vec![FactoryInput {
+                id: "f1".into(),
+                name: "F1".into(),
+                bays: 4,
+                bay_counts_by_quarter: vec![BayCountInput {
+                    year: 2026,
+                    quarter: 3,
+                    bays: 1,
+                }],
+            }],
+            products: vec![ProductInput {
+                id: "p1".into(),
+                name: "P".into(),
+                lead_times: vec![LeadTimeInput { year: 2026, quarter: 3, lead_time_days: 5 }],
+            }],
+            demand: vec![DemandInput {
+                id: "d1".into(),
+                product_id: "p1".into(),
+                period_type: "quarter".into(),
+                year: 2026,
+                period_index: 3,
+                quantity: 6,
+                spread_mode: "end".into(), // all due same day -> all need same window
+            }],
+        };
+        let out = run_schedule(&s);
+        // With all 6 needing the same window and only 1 bay during Q3, only 1 fits
+        assert_eq!(out.shipped_on_time, 1, "should be capped by Q3 override of 1 bay");
+        assert_eq!(out.unshippable, 5);
+    }
+
+    #[test]
+    fn variable_bays_increasing_quarter_expands_capacity() {
+        // Baseline 1 bay; Q3 2026 overridden to 4 bays. Six units all due Sep 30
+        // should now fit (was capped at 1 in the previous test).
+        let s = ScheduleInput {
+            factories: vec![FactoryInput {
+                id: "f1".into(),
+                name: "F1".into(),
+                bays: 1,
+                bay_counts_by_quarter: vec![BayCountInput {
+                    year: 2026,
+                    quarter: 3,
+                    bays: 4,
+                }],
+            }],
+            products: vec![ProductInput {
+                id: "p1".into(),
+                name: "P".into(),
+                lead_times: vec![LeadTimeInput { year: 2026, quarter: 3, lead_time_days: 5 }],
+            }],
+            demand: vec![DemandInput {
+                id: "d1".into(),
+                product_id: "p1".into(),
+                period_type: "quarter".into(),
+                year: 2026,
+                period_index: 3,
+                quantity: 4,
+                spread_mode: "end".into(),
+            }],
+        };
+        let out = run_schedule(&s);
+        assert_eq!(out.shipped_on_time, 4);
+        assert_eq!(out.unshippable, 0);
+    }
+
+    #[test]
+    fn variable_bays_window_crossing_quarter_uses_min() {
+        // Window crosses Q1->Q2 boundary. Q1 has 1 bay, Q2 has 4 bays.
+        // Bays beyond index 0 are unusable in any cross-quarter window because
+        // min(1, 4) = 1.
+        let s = ScheduleInput {
+            factories: vec![FactoryInput {
+                id: "f1".into(),
+                name: "F1".into(),
+                bays: 4,
+                bay_counts_by_quarter: vec![
+                    BayCountInput { year: 2026, quarter: 1, bays: 1 },
+                    BayCountInput { year: 2026, quarter: 2, bays: 4 },
+                ],
+            }],
+            products: vec![ProductInput {
+                id: "p1".into(),
+                name: "P".into(),
+                // 40-day LT for a unit due Apr 10 -> window [Mar 2, Apr 10] crosses Q1/Q2
+                lead_times: vec![LeadTimeInput { year: 2026, quarter: 2, lead_time_days: 40 }],
+            }],
+            demand: vec![DemandInput {
+                id: "d1".into(),
+                product_id: "p1".into(),
+                period_type: "month".into(),
+                year: 2026,
+                period_index: 4, // April
+                quantity: 4,
+                spread_mode: "start".into(), // all due Apr 1
+            }],
+        };
+        let out = run_schedule(&s);
+        // Cross-quarter windows are gated by min(Q1=1, Q2=4) = 1, so only 1 fits
+        assert_eq!(out.shipped_on_time, 1);
+        assert_eq!(out.unshippable, 3);
+    }
+
+    #[test]
     fn capacity_limited_shortfall() {
         // 1 bay, 5-day LT, but 3 units due same day -> only 1 fits, 2 unshippable
         let mut s = sample_scenario_one_unit_fits();
@@ -640,6 +881,7 @@ mod tests {
                 id: "f1".into(),
                 name: "F1".into(),
                 bays: 1,
+                bay_counts_by_quarter: vec![],
             }],
             products: vec![ProductInput {
                 id: "p1".into(),
@@ -682,6 +924,7 @@ mod tests {
                 id: "f1".into(),
                 name: "F1".into(),
                 bays: 2,
+                bay_counts_by_quarter: vec![],
             }],
             products: vec![ProductInput {
                 id: "p1".into(),

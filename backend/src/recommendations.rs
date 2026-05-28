@@ -266,6 +266,7 @@ mod tests {
                 id: "f1".into(),
                 name: "F1".into(),
                 bays: 1,
+                bay_counts_by_quarter: vec![],
             }],
             products: vec![ProductInput {
                 id: "p1".into(),
@@ -296,6 +297,7 @@ mod tests {
                 id: "f1".into(),
                 name: "F1".into(),
                 bays: 1,
+                bay_counts_by_quarter: vec![],
             }],
             products: vec![ProductInput {
                 id: "p1".into(),

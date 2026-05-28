@@ -6,11 +6,20 @@ export interface Scenario {
   is_active: boolean
 }
 
+export interface BayCountRow {
+  id: string
+  factory_id: string
+  year: number
+  quarter: number
+  bays: number
+}
+
 export interface Factory {
   id: string
   scenario_id: string
   name: string
   bays: number
+  bay_counts: BayCountRow[]
 }
 
 export interface LeadTimeRow {
