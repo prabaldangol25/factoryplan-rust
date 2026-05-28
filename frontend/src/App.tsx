@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import {
   Factory as FactoryIcon,
   Building2,
@@ -15,7 +15,9 @@ import { FactoryEditor } from './components/FactoryEditor'
 import { ProductEditor } from './components/ProductEditor'
 import { DemandEditor } from './components/DemandEditor'
 import { RunView } from './components/RunView'
-import { GanttView } from './components/GanttView'
+const GanttView = lazy(() =>
+  import('./components/GanttView').then((m) => ({ default: m.GanttView })),
+)
 import { ShipmentSummary } from './components/ShipmentSummary'
 import { RecommendationPanel } from './components/RecommendationPanel'
 import { UnshippableList } from './components/UnshippableList'
@@ -203,7 +205,19 @@ function ResultsTab({ result, context, onGoToRun }: ResultsTabProps) {
       </section>
       <section>
         <h3 className="text-sm font-semibold text-slate-700 mb-2">Gantt by factory</h3>
-        <GanttView result={result} factories={context.factories} products={context.products} />
+        <Suspense
+          fallback={
+            <div className="rounded-lg border border-slate-200 bg-white p-6 text-sm text-slate-500">
+              Loading chart…
+            </div>
+          }
+        >
+          <GanttView
+            result={result}
+            factories={context.factories}
+            products={context.products}
+          />
+        </Suspense>
       </section>
       {result.run.unshippable > 0 && (
         <section>
