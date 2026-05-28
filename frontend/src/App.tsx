@@ -8,11 +8,16 @@ import {
   BarChart3,
 } from 'lucide-react'
 import * as api from './api'
-import type { Scenario } from './types'
+import type { Demand, Factory, Product, RunResult, Scenario } from './types'
 import { ScenarioSwitcher } from './components/ScenarioSwitcher'
 import { FactoryEditor } from './components/FactoryEditor'
 import { ProductEditor } from './components/ProductEditor'
 import { DemandEditor } from './components/DemandEditor'
+import { RunView } from './components/RunView'
+import { GanttView } from './components/GanttView'
+import { ShipmentSummary } from './components/ShipmentSummary'
+import { RecommendationPanel } from './components/RecommendationPanel'
+import { UnshippableList } from './components/UnshippableList'
 import './App.css'
 
 type Tab = 'factories' | 'products' | 'demand' | 'run' | 'results'
@@ -22,6 +27,14 @@ function App() {
   const [activeId, setActiveId] = useState<string | null>(null)
   const [tab, setTab] = useState<Tab>('factories')
   const [bootError, setBootError] = useState<string | null>(null)
+
+  // Lifted state so results survive tab switches
+  const [result, setResult] = useState<RunResult | null>(null)
+  const [resultContext, setResultContext] = useState<{
+    factories: Factory[]
+    products: Product[]
+    demand: Demand[]
+  } | null>(null)
 
   async function reloadScenarios() {
     try {
@@ -39,6 +52,12 @@ function App() {
   useEffect(() => {
     void reloadScenarios()
   }, [])
+
+  // Clear result whenever scenario changes
+  useEffect(() => {
+    setResult(null)
+    setResultContext(null)
+  }, [activeId])
 
   if (bootError) {
     return (
@@ -69,7 +88,6 @@ function App() {
         <div className="max-w-6xl mx-auto px-6 py-3 flex items-center gap-3">
           <FactoryIcon className="w-6 h-6 text-indigo-600" />
           <h1 className="text-lg font-semibold">factoryplan-rust</h1>
-          <span className="ml-auto text-xs text-slate-500">Phase 1 · CRUD</span>
         </div>
       </header>
 
@@ -115,18 +133,67 @@ function App() {
             {tab === 'products' && <ProductEditor scenarioId={activeId} />}
             {tab === 'demand' && <DemandEditor scenarioId={activeId} />}
             {tab === 'run' && (
-              <div className="rounded-lg border border-dashed border-slate-300 p-10 text-center text-slate-500">
-                Run will be implemented in Phase 2.
-              </div>
+              <RunView
+                scenarioId={activeId}
+                result={result}
+                resultContext={resultContext}
+                onResult={(r, ctx) => {
+                  setResult(r)
+                  setResultContext(ctx)
+                  setTab('results')
+                }}
+              />
             )}
             {tab === 'results' && (
-              <div className="rounded-lg border border-dashed border-slate-300 p-10 text-center text-slate-500">
-                Results views land in Phase 4.
-              </div>
+              <ResultsTab result={result} context={resultContext} onGoToRun={() => setTab('run')} />
             )}
           </>
         )}
       </main>
+    </div>
+  )
+}
+
+interface ResultsTabProps {
+  result: RunResult | null
+  context: { factories: Factory[]; products: Product[]; demand: Demand[] } | null
+  onGoToRun: () => void
+}
+
+function ResultsTab({ result, context, onGoToRun }: ResultsTabProps) {
+  if (!result || !context) {
+    return (
+      <div className="rounded-lg border border-dashed border-slate-300 p-10 text-center text-slate-500 text-sm">
+        No results yet.{' '}
+        <button className="text-indigo-600 hover:underline" onClick={onGoToRun}>
+          Go to the Run tab
+        </button>{' '}
+        to compute a schedule.
+      </div>
+    )
+  }
+  return (
+    <div className="space-y-6">
+      <RecommendationPanel
+        recommendation={result.recommendation}
+        totalDemand={result.run.total_demand}
+        shipped={result.run.shipped_on_time}
+        unshippable={result.run.unshippable}
+      />
+      <section>
+        <h3 className="text-sm font-semibold text-slate-700 mb-2">Shipment summary</h3>
+        <ShipmentSummary result={result} demand={context.demand} products={context.products} />
+      </section>
+      <section>
+        <h3 className="text-sm font-semibold text-slate-700 mb-2">Gantt by factory</h3>
+        <GanttView result={result} factories={context.factories} products={context.products} />
+      </section>
+      {result.run.unshippable > 0 && (
+        <section>
+          <h3 className="text-sm font-semibold text-slate-700 mb-2">Unshippable units</h3>
+          <UnshippableList result={result} products={context.products} />
+        </section>
+      )}
     </div>
   )
 }

@@ -68,7 +68,6 @@ export interface PerProductLtTarget {
   product_name: string
   current_lead_time_days: number
   target_lead_time_days: number
-  applies_to_quarter?: { year: number; quarter: number }
 }
 
 export interface BaysNeededRec {
@@ -82,9 +81,9 @@ export interface UniformLtPctRec {
 }
 
 export interface Recommendation {
-  bays_needed?: BaysNeededRec
-  uniform_lt_pct?: UniformLtPctRec
-  per_product_lt?: PerProductLtTarget[]
+  bays_needed: BaysNeededRec | null
+  uniform_lt_pct: UniformLtPctRec | null
+  per_product_lt: PerProductLtTarget[]
 }
 
 export interface RunResult {
