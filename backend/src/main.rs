@@ -2,6 +2,8 @@ mod db;
 mod error;
 mod handlers;
 mod models;
+mod recommendations;
+mod scheduling;
 
 use actix_cors::Cors;
 use actix_web::{get, web, App, HttpServer, Responder};
