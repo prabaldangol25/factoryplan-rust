@@ -19,6 +19,7 @@ export function RunView({ scenarioId, result, onResult }: Props) {
   const [demand, setDemand] = useState<Demand[]>([])
   const [running, setRunning] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [optimize, setOptimize] = useState<api.OptimizeMode>('balance')
 
   async function loadContext() {
     try {
@@ -49,7 +50,7 @@ export function RunView({ scenarioId, result, onResult }: Props) {
     try {
       const ctx = await loadContext()
       if (!ctx) return
-      const r = await api.runScenario(scenarioId)
+      const r = await api.runScenario(scenarioId, optimize)
       onResult(r, ctx)
     } catch (e: unknown) {
       setError(((e as { message?: string }).message) ?? 'run failed')
@@ -90,6 +91,46 @@ export function RunView({ scenarioId, result, onResult }: Props) {
             Add at least one factory, product, and demand row before running.
           </div>
         )}
+
+        <div className="mt-4">
+          <div className="text-sm font-medium text-slate-600 mb-1.5">Bay assignment</div>
+          <div className="flex flex-col gap-1.5 text-sm">
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input
+                type="radio"
+                name="optimize"
+                className="mt-0.5"
+                checked={optimize === 'balance'}
+                onChange={() => setOptimize('balance')}
+              />
+              <span>
+                <span className="font-medium text-slate-700">Balance load</span>
+                <span className="text-slate-500">
+                  {' '}
+                  — spread work across all factories and bays.
+                </span>
+              </span>
+            </label>
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input
+                type="radio"
+                name="optimize"
+                className="mt-0.5"
+                checked={optimize === 'utilization'}
+                onChange={() => setOptimize('utilization')}
+              />
+              <span>
+                <span className="font-medium text-slate-700">Maximize utilization</span>
+                <span className="text-slate-500">
+                  {' '}
+                  — pack work into as few bays as possible; unneeded bays stay empty
+                  (shown green in the Gantt).
+                </span>
+              </span>
+            </label>
+          </div>
+        </div>
+
         <div className="mt-4 flex items-center gap-2">
           <button
             className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"

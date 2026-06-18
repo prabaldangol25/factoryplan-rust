@@ -45,6 +45,9 @@ async fn main() -> std::io::Result<()> {
         .await
         .expect("failed to initialize database pool");
 
+    // Clear any agent prompt files left behind by a prior crash.
+    handlers::agent::cleanup_temp_files();
+
     HttpServer::new(move || {
         let cors = Cors::default()
             .allow_any_origin()

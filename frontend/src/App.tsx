@@ -7,6 +7,10 @@ import {
   Play,
   BarChart3,
   Download,
+  MessageCircle,
+  Table2,
+  LayoutGrid,
+  Users,
 } from 'lucide-react'
 import * as api from './api'
 import type { Demand, Factory, Product, RunResult, Scenario } from './types'
@@ -21,9 +25,29 @@ const GanttView = lazy(() =>
 import { ShipmentSummary } from './components/ShipmentSummary'
 import { RecommendationPanel } from './components/RecommendationPanel'
 import { UnshippableList } from './components/UnshippableList'
+import { BacklogView } from './components/BacklogView'
+import { ReportView } from './components/ReportView'
+const BayRequirementsView = lazy(() =>
+  import('./components/BayRequirementsView').then((m) => ({ default: m.BayRequirementsView })),
+)
+const HeadcountView = lazy(() =>
+  import('./components/HeadcountView').then((m) => ({ default: m.HeadcountView })),
+)
+const AgentChat = lazy(() =>
+  import('./components/AgentChat').then((m) => ({ default: m.AgentChat })),
+)
 import './App.css'
 
-type Tab = 'factories' | 'products' | 'demand' | 'run' | 'results'
+type Tab =
+  | 'factories'
+  | 'products'
+  | 'demand'
+  | 'run'
+  | 'results'
+  | 'bays'
+  | 'headcount'
+  | 'report'
+  | 'agent'
 
 function App() {
   const [scenarios, setScenarios] = useState<Scenario[]>([])
@@ -83,6 +107,10 @@ function App() {
     { key: 'demand', label: 'Demand', icon: ListChecks },
     { key: 'run', label: 'Run', icon: Play },
     { key: 'results', label: 'Results', icon: BarChart3 },
+    { key: 'bays', label: 'Bay Req', icon: LayoutGrid },
+    { key: 'headcount', label: 'Headcount', icon: Users },
+    { key: 'report', label: 'Report', icon: Table2 },
+    { key: 'agent', label: 'Agent', icon: MessageCircle },
   ]
 
   return (
@@ -150,6 +178,39 @@ function App() {
             {tab === 'results' && (
               <ResultsTab result={result} context={resultContext} onGoToRun={() => setTab('run')} />
             )}
+            {tab === 'bays' && (
+              <Suspense
+                fallback={<div className="p-6 text-slate-500 text-sm">Loading…</div>}
+              >
+                <BayRequirementsView scenarioId={activeId} />
+              </Suspense>
+            )}
+            {tab === 'headcount' && (
+              <Suspense
+                fallback={<div className="p-6 text-slate-500 text-sm">Loading…</div>}
+              >
+                <HeadcountView
+                  scenarioId={activeId}
+                  result={result}
+                  context={resultContext}
+                  onGoToRun={() => setTab('run')}
+                />
+              </Suspense>
+            )}
+            {tab === 'report' && (
+              <ReportView
+                result={result}
+                context={resultContext}
+                onGoToRun={() => setTab('run')}
+              />
+            )}
+            {tab === 'agent' && (
+              <Suspense
+                fallback={<div className="p-6 text-slate-500 text-sm">Loading agent…</div>}
+              >
+                <AgentChat scenarioId={activeId} />
+              </Suspense>
+            )}
           </>
         )}
       </main>
@@ -197,8 +258,13 @@ function ResultsTab({ result, context, onGoToRun }: ResultsTabProps) {
         recommendation={result.recommendation}
         totalDemand={result.run.total_demand}
         shipped={result.run.shipped_on_time}
+        shippedLate={result.run.shipped_late}
         unshippable={result.run.unshippable}
       />
+      <section>
+        <h3 className="text-sm font-semibold text-slate-700 mb-2">Quarterly backlog</h3>
+        <BacklogView result={result} />
+      </section>
       <section>
         <h3 className="text-sm font-semibold text-slate-700 mb-2">Shipment summary</h3>
         <ShipmentSummary

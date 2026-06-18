@@ -4,6 +4,7 @@ pub mod products;
 pub mod demand;
 pub mod runs;
 pub mod import_export;
+pub mod agent;
 
 use actix_web::web;
 
@@ -14,4 +15,5 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     demand::configure(cfg);
     runs::configure(cfg);
     import_export::configure(cfg);
+    agent::configure(cfg);
 }

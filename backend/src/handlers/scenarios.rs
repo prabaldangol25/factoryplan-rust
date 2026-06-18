@@ -49,18 +49,20 @@ async fn create_scenario(
     if let Some(src_id) = &body.clone_from {
         // factories + per-quarter bay-count overrides
         let factories = sqlx::query_as::<_, Factory>(
-            "SELECT id, scenario_id, name, bays FROM factory WHERE scenario_id = ?",
+            "SELECT id, scenario_id, name, bays, changeover_days FROM factory WHERE scenario_id = ?",
         )
         .bind(src_id)
         .fetch_all(&mut *tx)
         .await?;
+        let mut factory_id_map: std::collections::HashMap<String, String> = Default::default();
         for f in factories {
             let new_fid = new_id();
-            sqlx::query("INSERT INTO factory (id, scenario_id, name, bays) VALUES (?, ?, ?, ?)")
+            sqlx::query("INSERT INTO factory (id, scenario_id, name, bays, changeover_days) VALUES (?, ?, ?, ?, ?)")
                 .bind(&new_fid)
                 .bind(&id)
                 .bind(&f.name)
                 .bind(f.bays)
+                .bind(f.changeover_days)
                 .execute(&mut *tx)
                 .await?;
             let bcs = sqlx::query_as::<_, BayCountRow>(
@@ -79,6 +81,7 @@ async fn create_scenario(
                     .execute(&mut *tx)
                     .await?;
             }
+            factory_id_map.insert(f.id, new_fid);
         }
 
         // products + lead times (need id remap)
@@ -113,19 +116,56 @@ async fn create_scenario(
                     .execute(&mut *tx)
                     .await?;
             }
+            // per-factory lead-time overrides (remap both product_id and factory_id)
+            let flts = sqlx::query_as::<_, FactoryLeadTimeRow>(
+                "SELECT id, product_id, factory_id, year, quarter, lead_time_days FROM product_factory_lead_time WHERE product_id = ?",
+            )
+            .bind(&p.id)
+            .fetch_all(&mut *tx)
+            .await?;
+            for flt in flts {
+                let Some(new_fid) = factory_id_map.get(&flt.factory_id) else { continue };
+                sqlx::query("INSERT INTO product_factory_lead_time (id, product_id, factory_id, year, quarter, lead_time_days) VALUES (?, ?, ?, ?, ?, ?)")
+                    .bind(new_id())
+                    .bind(&new_pid)
+                    .bind(new_fid)
+                    .bind(flt.year)
+                    .bind(flt.quarter)
+                    .bind(flt.lead_time_days)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            let allocs = sqlx::query_as::<_, FactoryAllocationRow>(
+                "SELECT id, product_id, factory_id, year, quarter, allocation_pct FROM product_factory_allocation WHERE product_id = ?",
+            )
+            .bind(&p.id)
+            .fetch_all(&mut *tx)
+            .await?;
+            for a in allocs {
+                let Some(new_fid) = factory_id_map.get(&a.factory_id) else { continue };
+                sqlx::query("INSERT INTO product_factory_allocation (id, product_id, factory_id, year, quarter, allocation_pct) VALUES (?, ?, ?, ?, ?, ?)")
+                    .bind(new_id())
+                    .bind(&new_pid)
+                    .bind(new_fid)
+                    .bind(a.year)
+                    .bind(a.quarter)
+                    .bind(a.allocation_pct)
+                    .execute(&mut *tx)
+                    .await?;
+            }
             product_id_map.insert(p.id, new_pid);
         }
 
         // demand (remap product_id)
         let demands = sqlx::query_as::<_, Demand>(
-            "SELECT id, scenario_id, product_id, period_type, year, period_index, quantity, spread_mode FROM demand WHERE scenario_id = ?",
+            "SELECT id, scenario_id, product_id, period_type, year, period_index, quantity, spread_mode, serial_mode, serial_start, serial_list FROM demand WHERE scenario_id = ?",
         )
         .bind(src_id)
         .fetch_all(&mut *tx)
         .await?;
         for d in demands {
             let Some(new_pid) = product_id_map.get(&d.product_id) else { continue };
-            sqlx::query("INSERT INTO demand (id, scenario_id, product_id, period_type, year, period_index, quantity, spread_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+            sqlx::query("INSERT INTO demand (id, scenario_id, product_id, period_type, year, period_index, quantity, spread_mode, serial_mode, serial_start, serial_list) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
                 .bind(new_id())
                 .bind(&id)
                 .bind(new_pid)
@@ -134,6 +174,9 @@ async fn create_scenario(
                 .bind(d.period_index)
                 .bind(d.quantity)
                 .bind(&d.spread_mode)
+                .bind(&d.serial_mode)
+                .bind(&d.serial_start)
+                .bind(&d.serial_list)
                 .execute(&mut *tx)
                 .await?;
         }

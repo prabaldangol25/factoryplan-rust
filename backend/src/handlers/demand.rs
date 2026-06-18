@@ -49,11 +49,20 @@ fn validate_demand_inputs(
     Ok(())
 }
 
+fn validate_serial_mode(serial_mode: &str) -> Result<(), AppError> {
+    if !["none", "sequence", "list"].contains(&serial_mode) {
+        return Err(AppError::BadRequest(format!(
+            "serial_mode must be none/sequence/list (got '{serial_mode}')"
+        )));
+    }
+    Ok(())
+}
+
 #[get("/api/scenarios/{id}/demand")]
 async fn list_demand(pool: web::Data<Pool>, path: web::Path<String>) -> AppResult<HttpResponse> {
     let scenario_id = path.into_inner();
     let rows = sqlx::query_as::<_, Demand>(
-        "SELECT id, scenario_id, product_id, period_type, year, period_index, quantity, spread_mode FROM demand WHERE scenario_id = ? ORDER BY year, period_index",
+        "SELECT id, scenario_id, product_id, period_type, year, period_index, quantity, spread_mode, serial_mode, serial_start, serial_list FROM demand WHERE scenario_id = ? ORDER BY year, period_index",
     )
     .bind(&scenario_id)
     .fetch_all(pool.get_ref())
@@ -74,8 +83,9 @@ async fn create_demand(
         body.quantity,
         &body.spread_mode,
     )?;
+    validate_serial_mode(&body.serial_mode)?;
     let id = new_id();
-    sqlx::query("INSERT INTO demand (id, scenario_id, product_id, period_type, year, period_index, quantity, spread_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+    sqlx::query("INSERT INTO demand (id, scenario_id, product_id, period_type, year, period_index, quantity, spread_mode, serial_mode, serial_start, serial_list) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
         .bind(&id)
         .bind(&scenario_id)
         .bind(&body.product_id)
@@ -84,10 +94,13 @@ async fn create_demand(
         .bind(body.period_index)
         .bind(body.quantity)
         .bind(&body.spread_mode)
+        .bind(&body.serial_mode)
+        .bind(&body.serial_start)
+        .bind(&body.serial_list)
         .execute(pool.get_ref())
         .await?;
     let row = sqlx::query_as::<_, Demand>(
-        "SELECT id, scenario_id, product_id, period_type, year, period_index, quantity, spread_mode FROM demand WHERE id = ?",
+        "SELECT id, scenario_id, product_id, period_type, year, period_index, quantity, spread_mode, serial_mode, serial_start, serial_list FROM demand WHERE id = ?",
     )
     .bind(&id)
     .fetch_one(pool.get_ref())
@@ -108,13 +121,17 @@ async fn update_demand(
         body.quantity,
         &body.spread_mode,
     )?;
-    let res = sqlx::query("UPDATE demand SET product_id = ?, period_type = ?, year = ?, period_index = ?, quantity = ?, spread_mode = ? WHERE id = ?")
+    validate_serial_mode(&body.serial_mode)?;
+    let res = sqlx::query("UPDATE demand SET product_id = ?, period_type = ?, year = ?, period_index = ?, quantity = ?, spread_mode = ?, serial_mode = ?, serial_start = ?, serial_list = ? WHERE id = ?")
         .bind(&body.product_id)
         .bind(&body.period_type)
         .bind(body.year)
         .bind(body.period_index)
         .bind(body.quantity)
         .bind(&body.spread_mode)
+        .bind(&body.serial_mode)
+        .bind(&body.serial_start)
+        .bind(&body.serial_list)
         .bind(&id)
         .execute(pool.get_ref())
         .await?;
@@ -122,7 +139,7 @@ async fn update_demand(
         return Err(AppError::NotFound(format!("demand {id}")));
     }
     let row = sqlx::query_as::<_, Demand>(
-        "SELECT id, scenario_id, product_id, period_type, year, period_index, quantity, spread_mode FROM demand WHERE id = ?",
+        "SELECT id, scenario_id, product_id, period_type, year, period_index, quantity, spread_mode, serial_mode, serial_start, serial_list FROM demand WHERE id = ?",
     )
     .bind(&id)
     .fetch_one(pool.get_ref())

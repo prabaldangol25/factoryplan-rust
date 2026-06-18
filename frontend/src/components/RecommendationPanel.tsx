@@ -5,6 +5,7 @@ interface Props {
   recommendation: Recommendation
   totalDemand: number
   shipped: number
+  shippedLate: number
   unshippable: number
 }
 
@@ -32,15 +33,16 @@ export function RecommendationPanel({
   recommendation,
   totalDemand,
   shipped,
+  shippedLate,
   unshippable,
 }: Props) {
-  const allClear = unshippable === 0
-  if (allClear) {
+  const notOnTime = shippedLate + unshippable
+  if (notOnTime === 0) {
     return (
       <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
         <div className="font-medium">All {totalDemand} units ship on time.</div>
         <div className="text-emerald-700 mt-1">
-          {shipped} shipped, 0 unshippable. No recommendations needed.
+          {shipped} shipped on time, 0 late, 0 unshippable. No recommendations needed.
         </div>
       </div>
     )
@@ -49,15 +51,25 @@ export function RecommendationPanel({
   const { bays_needed, uniform_lt_pct, per_product_lt } = recommendation
   const noRecommendable =
     !bays_needed && !uniform_lt_pct && (per_product_lt?.length ?? 0) === 0
+  // Only late (nothing truly unshippable) → softer amber framing.
+  const onlyLate = unshippable === 0
 
   return (
     <div className="space-y-3">
-      <div className="rounded-lg border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">
+      <div
+        className={
+          onlyLate
+            ? 'rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900'
+            : 'rounded-lg border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800'
+        }
+      >
         <div className="font-medium">
-          Shortfall: {unshippable} unshippable of {totalDemand}.
+          {notOnTime} of {totalDemand} miss their demanded quarter
+          {unshippable > 0 && ` (${unshippable} never ship within the horizon)`}.
         </div>
-        <div className="text-rose-700 mt-1">
-          {shipped} shipped on time. Pick a lever below.
+        <div className={`mt-1 ${onlyLate ? 'text-amber-800' : 'text-rose-700'}`}>
+          {shipped} on time · {shippedLate} late · {unshippable} unshippable. Pick a lever below
+          to ship everything on time.
         </div>
       </div>
 

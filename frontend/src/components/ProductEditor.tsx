@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Plus, Trash2, Save, ChevronDown, ChevronRight } from 'lucide-react'
-import type { Product } from '../types'
+import type { Factory, Product } from '../types'
 import * as api from '../api'
 
 interface Props {
@@ -13,17 +13,39 @@ interface LtCell {
   lead_time_days: number
 }
 
+interface AllocationCell {
+  factory_id: string
+  allocation_pct: number
+}
+
+interface Draft {
+  name: string
+  /** Base per-(year, quarter) lead-time matrix. */
+  matrix: Record<string, LtCell>
+  /** Whether per-factory overrides are enabled for this product. */
+  useFactory: boolean
+  /** factory_id -> per-(year, quarter) override matrix. */
+  factoryMatrix: Record<string, Record<string, LtCell>>
+  /** Whether product-to-factory allocation rules are enabled. */
+  useAllocation: boolean
+  /** "global" or "YYYY-QN" -> selected factory and target percentage. */
+  allocationMatrix: Record<string, AllocationCell>
+}
+
 function ltKey(year: number, quarter: number) {
+  return `${year}-Q${quarter}`
+}
+
+function allocationKey(year: number, quarter: number) {
   return `${year}-Q${quarter}`
 }
 
 export function ProductEditor({ scenarioId }: Props) {
   const [products, setProducts] = useState<Product[]>([])
+  const [factories, setFactories] = useState<Factory[]>([])
   const [error, setError] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
-  const [drafts, setDrafts] = useState<
-    Record<string, { name: string; matrix: Record<string, LtCell> }>
-  >({})
+  const [drafts, setDrafts] = useState<Record<string, Draft>>({})
   const [newName, setNewName] = useState('')
   const [yearRange, setYearRange] = useState<{ from: number; to: number }>(() => {
     const y = new Date().getFullYear()
@@ -33,8 +55,12 @@ export function ProductEditor({ scenarioId }: Props) {
   async function reload() {
     try {
       setError(null)
-      const list = await api.listProducts(scenarioId)
+      const [list, facs] = await Promise.all([
+        api.listProducts(scenarioId),
+        api.listFactories(scenarioId),
+      ])
       setProducts(list)
+      setFactories(facs)
     } catch (e: unknown) {
       setError(((e as { message?: string }).message) ?? 'load failed')
     }
@@ -43,7 +69,7 @@ export function ProductEditor({ scenarioId }: Props) {
     if (scenarioId) void reload()
   }, [scenarioId])
 
-  function initDraft(p: Product) {
+  function initDraft(p: Product): Draft {
     const matrix: Record<string, LtCell> = {}
     for (const lt of p.lead_times) {
       matrix[ltKey(lt.year, lt.quarter)] = {
@@ -52,16 +78,41 @@ export function ProductEditor({ scenarioId }: Props) {
         lead_time_days: lt.lead_time_days,
       }
     }
-    return { name: p.name, matrix }
+    // Seed a (stable-ordered) empty matrix per factory, then fill overrides.
+    // `factory_lead_times` may be absent if served by an older backend build.
+    const factoryLeadTimes = p.factory_lead_times ?? []
+    const factoryMatrix: Record<string, Record<string, LtCell>> = {}
+    for (const f of factories) factoryMatrix[f.id] = {}
+    for (const lt of factoryLeadTimes) {
+      if (!factoryMatrix[lt.factory_id]) factoryMatrix[lt.factory_id] = {}
+      factoryMatrix[lt.factory_id][ltKey(lt.year, lt.quarter)] = {
+        year: lt.year,
+        quarter: lt.quarter,
+        lead_time_days: lt.lead_time_days,
+      }
+    }
+    const factoryAllocations = p.factory_allocations ?? []
+    const allocationMatrix: Record<string, AllocationCell> = {}
+    for (const a of factoryAllocations) {
+      allocationMatrix[a.year === 0 && a.quarter === 0 ? 'global' : allocationKey(a.year, a.quarter)] = {
+        factory_id: a.factory_id,
+        allocation_pct: a.allocation_pct,
+      }
+    }
+    return {
+      name: p.name,
+      matrix,
+      useFactory: factoryLeadTimes.length > 0,
+      factoryMatrix,
+      useAllocation: factoryAllocations.length > 0,
+      allocationMatrix,
+    }
   }
 
   function draftFor(p: Product) {
     return drafts[p.id] ?? initDraft(p)
   }
-  function setDraft(
-    id: string,
-    fn: (d: { name: string; matrix: Record<string, LtCell> }) => { name: string; matrix: Record<string, LtCell> },
-  ) {
+  function setDraft(id: string, fn: (d: Draft) => Draft) {
     setDrafts((s) => {
       const current = s[id] ?? initDraft(products.find((p) => p.id === id)!)
       return { ...s, [id]: fn(current) }
@@ -69,10 +120,14 @@ export function ProductEditor({ scenarioId }: Props) {
   }
 
   async function handleCreate() {
-    if (!newName.trim()) return
+    if (!newName.trim()) {
+      setError('Enter a product name in the “New product name…” box first.')
+      return
+    }
     try {
       await api.createProduct(scenarioId, newName.trim(), [])
       setNewName('')
+      setError(null)
       await reload()
     } catch (e: unknown) {
       setError(((e as { message?: string }).message) ?? 'create failed')
@@ -82,8 +137,51 @@ export function ProductEditor({ scenarioId }: Props) {
   async function handleSave(p: Product) {
     const d = draftFor(p)
     const lts = Object.values(d.matrix).filter((c) => c.lead_time_days > 0)
+    const factoryLts = d.useFactory
+      ? Object.entries(d.factoryMatrix).flatMap(([factory_id, m]) =>
+          Object.values(m)
+            .filter((c) => c.lead_time_days > 0)
+            .map((c) => ({
+              factory_id,
+              year: c.year,
+              quarter: c.quarter,
+              lead_time_days: c.lead_time_days,
+            })),
+        )
+      : []
+    const factoryAllocations = d.useAllocation
+      ? Object.entries(d.allocationMatrix)
+          .filter(([, c]) => c.factory_id && c.allocation_pct >= 0 && c.allocation_pct <= 100)
+          .map(([k, c]) => {
+            if (k === 'global') {
+              return {
+                factory_id: c.factory_id,
+                year: 0,
+                quarter: 0,
+                allocation_pct: c.allocation_pct,
+              }
+            }
+            const [yearPart, qPart] = k.split('-Q')
+            return {
+              factory_id: c.factory_id,
+              year: parseInt(yearPart, 10),
+              quarter: parseInt(qPart, 10),
+              allocation_pct: c.allocation_pct,
+            }
+          })
+      : []
     try {
-      await api.updateProduct(p.id, d.name.trim(), lts)
+      const updated = await api.updateProduct(p.id, d.name.trim(), lts, factoryLts, factoryAllocations)
+      if (
+        d.useAllocation &&
+        factoryAllocations.length > 0 &&
+        (updated.factory_allocations?.length ?? 0) === 0
+      ) {
+        setError(
+          'Allocation settings were sent, but the backend did not return saved allocations. Restart the backend so migration 0007 is applied.',
+        )
+        return
+      }
       setDrafts((s) => {
         const x = { ...s }
         delete x[p.id]
@@ -159,6 +257,16 @@ export function ProductEditor({ scenarioId }: Props) {
                   value={d.name}
                   onChange={(e) => setDraft(p.id, (x) => ({ ...x, name: e.target.value }))}
                 />
+                {(p.factory_lead_times?.length ?? 0) > 0 && (
+                  <span className="text-xs px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 whitespace-nowrap">
+                    factory-specific LT
+                  </span>
+                )}
+                {(p.factory_allocations?.length ?? 0) > 0 && (
+                  <span className="text-xs px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 whitespace-nowrap">
+                    factory allocation
+                  </span>
+                )}
                 {dirty && (
                   <button
                     className="text-emerald-700 hover:text-emerald-900"
@@ -177,71 +285,327 @@ export function ProductEditor({ scenarioId }: Props) {
                 </button>
               </div>
               {isOpen && (
-                <div className="px-3 pb-4 overflow-x-auto">
-                  <table className="text-sm border border-slate-200">
-                    <thead className="bg-slate-50">
-                      <tr>
-                        <th className="px-2 py-1 text-left font-medium text-slate-600">Year</th>
-                        {[1, 2, 3, 4].map((q) => (
-                          <th
-                            key={q}
-                            className="px-2 py-1 font-medium text-slate-600 w-24 text-center"
-                          >
-                            Q{q}
-                          </th>
+                <div className="px-3 pb-4 space-y-4">
+                  <div className="overflow-x-auto">
+                    <div className="text-xs font-medium text-slate-500 mb-1">
+                      Default lead time (days) — applies at every factory unless overridden
+                    </div>
+                    <table className="text-sm border border-slate-200">
+                      <thead className="bg-slate-50">
+                        <tr>
+                          <th className="px-2 py-1 text-left font-medium text-slate-600">Year</th>
+                          {[1, 2, 3, 4].map((q) => (
+                            <th
+                              key={q}
+                              className="px-2 py-1 font-medium text-slate-600 w-24 text-center"
+                            >
+                              Q{q}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {years.map((y) => (
+                          <tr key={y} className="border-t border-slate-200">
+                            <td className="px-2 py-1 font-medium">{y}</td>
+                            {[1, 2, 3, 4].map((q) => {
+                              const k = ltKey(y, q)
+                              const cell = d.matrix[k]
+                              return (
+                                <td key={q} className="px-1 py-1">
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    placeholder="days"
+                                    className="w-20 border border-slate-200 rounded px-2 py-1 text-center"
+                                    value={cell?.lead_time_days ?? ''}
+                                    onChange={(e) => {
+                                      const v = parseInt(e.target.value)
+                                      setDraft(p.id, (x) => {
+                                        const next = { ...x, matrix: { ...x.matrix } }
+                                        if (!v || v <= 0) delete next.matrix[k]
+                                        else
+                                          next.matrix[k] = {
+                                            year: y,
+                                            quarter: q,
+                                            lead_time_days: v,
+                                          }
+                                        return next
+                                      })
+                                    }}
+                                  />
+                                </td>
+                              )
+                            })}
+                          </tr>
                         ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {years.map((y) => (
-                        <tr key={y} className="border-t border-slate-200">
-                          <td className="px-2 py-1 font-medium">{y}</td>
-                          {[1, 2, 3, 4].map((q) => {
-                            const k = ltKey(y, q)
-                            const cell = d.matrix[k]
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={d.useFactory}
+                      onChange={(e) =>
+                        setDraft(p.id, (x) => ({ ...x, useFactory: e.target.checked }))
+                      }
+                    />
+                    Set factory-specific lead times
+                    <span className="text-xs text-slate-400">
+                      (leave a cell blank to inherit the default)
+                    </span>
+                  </label>
+
+                  {d.useFactory && (
+                    <div className="space-y-3 pl-1 border-l-2 border-indigo-100">
+                      {factories.length === 0 && (
+                        <div className="text-sm text-slate-500 pl-3">
+                          No factories defined yet — add factories first.
+                        </div>
+                      )}
+                      {factories.map((f) => {
+                        const fm = d.factoryMatrix[f.id] ?? {}
+                        return (
+                          <div key={f.id} className="overflow-x-auto pl-3">
+                            <div className="text-xs font-medium text-slate-600 mb-1">{f.name}</div>
+                            <table className="text-sm border border-slate-200">
+                              <thead className="bg-slate-50">
+                                <tr>
+                                  <th className="px-2 py-1 text-left font-medium text-slate-600">
+                                    Year
+                                  </th>
+                                  {[1, 2, 3, 4].map((q) => (
+                                    <th
+                                      key={q}
+                                      className="px-2 py-1 font-medium text-slate-600 w-24 text-center"
+                                    >
+                                      Q{q}
+                                    </th>
+                                  ))}
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {years.map((y) => (
+                                  <tr key={y} className="border-t border-slate-200">
+                                    <td className="px-2 py-1 font-medium">{y}</td>
+                                    {[1, 2, 3, 4].map((q) => {
+                                      const k = ltKey(y, q)
+                                      const cell = fm[k]
+                                      const base = d.matrix[k]?.lead_time_days
+                                      return (
+                                        <td key={q} className="px-1 py-1">
+                                          <input
+                                            type="number"
+                                            min={0}
+                                            placeholder={base ? `${base}` : 'inherit'}
+                                            className="w-20 border border-slate-200 rounded px-2 py-1 text-center"
+                                            value={cell?.lead_time_days ?? ''}
+                                            onChange={(e) => {
+                                              const v = parseInt(e.target.value)
+                                              setDraft(p.id, (x) => {
+                                                const fmNext = { ...(x.factoryMatrix[f.id] ?? {}) }
+                                                if (!v || v <= 0) delete fmNext[k]
+                                                else
+                                                  fmNext[k] = {
+                                                    year: y,
+                                                    quarter: q,
+                                                    lead_time_days: v,
+                                                  }
+                                                return {
+                                                  ...x,
+                                                  factoryMatrix: {
+                                                    ...x.factoryMatrix,
+                                                    [f.id]: fmNext,
+                                                  },
+                                                }
+                                              })
+                                            }}
+                                          />
+                                        </td>
+                                      )
+                                    })}
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+
+                  <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={d.useAllocation}
+                      onChange={(e) =>
+                        setDraft(p.id, (x) => ({
+                          ...x,
+                          useAllocation: e.target.checked,
+                          allocationMatrix:
+                            e.target.checked &&
+                            Object.keys(x.allocationMatrix).length === 0 &&
+                            factories[0]
+                              ? {
+                                  global: {
+                                    factory_id: factories[0].id,
+                                    allocation_pct: 100,
+                                  },
+                                }
+                              : x.allocationMatrix,
+                        }))
+                      }
+                    />
+                    Set product-to-factory allocation
+                    <span className="text-xs text-slate-400">
+                      (send a chosen % to one factory; remainder goes to other factories)
+                    </span>
+                  </label>
+
+                  {d.useAllocation && (
+                    <div className="space-y-3 pl-3 border-l-2 border-amber-100">
+                      {factories.length === 0 ? (
+                        <div className="text-sm text-slate-500">
+                          No factories defined yet — add factories first.
+                        </div>
+                      ) : (
+                        <>
+                          <div className="text-xs text-slate-500">
+                            A global rule applies to all quarters unless a specific quarter below
+                            overrides it. Use 100% to force the product to that factory.
+                          </div>
+                          {[
+                            { key: 'global', label: 'All quarters' },
+                            ...years.flatMap((y) =>
+                              [1, 2, 3, 4].map((q) => ({
+                                key: allocationKey(y, q),
+                                label: `${y} Q${q}`,
+                              })),
+                            ),
+                          ].map((row) => {
+                            const cell = d.allocationMatrix[row.key]
+                            const selectedFactory = cell?.factory_id ?? factories[0]?.id ?? ''
+                            const pct = cell?.allocation_pct ?? 100
                             return (
-                              <td key={q} className="px-1 py-1">
+                              <div
+                                key={row.key}
+                                className="grid grid-cols-[7rem_minmax(10rem,14rem)_1fr_4rem_auto] items-center gap-2 text-sm"
+                              >
+                                <div className="font-medium text-slate-600">{row.label}</div>
+                                <select
+                                  className="border border-slate-300 rounded px-2 py-1 bg-white"
+                                  value={selectedFactory}
+                                  onChange={(e) => {
+                                    const factory_id = e.target.value
+                                    setDraft(p.id, (x) => ({
+                                      ...x,
+                                      allocationMatrix: {
+                                        ...x.allocationMatrix,
+                                        [row.key]: {
+                                          factory_id,
+                                          allocation_pct:
+                                            x.allocationMatrix[row.key]?.allocation_pct ?? pct,
+                                        },
+                                      },
+                                    }))
+                                  }}
+                                >
+                                  {factories.map((f) => (
+                                    <option key={f.id} value={f.id}>
+                                      {f.name}
+                                    </option>
+                                  ))}
+                                </select>
+                                <input
+                                  type="range"
+                                  min={0}
+                                  max={100}
+                                  step={5}
+                                  value={pct}
+                                  onChange={(e) => {
+                                    const allocation_pct = parseInt(e.target.value, 10)
+                                    setDraft(p.id, (x) => ({
+                                      ...x,
+                                      allocationMatrix: {
+                                        ...x.allocationMatrix,
+                                        [row.key]: {
+                                          factory_id:
+                                            x.allocationMatrix[row.key]?.factory_id ??
+                                            selectedFactory,
+                                          allocation_pct,
+                                        },
+                                      },
+                                    }))
+                                  }}
+                                />
                                 <input
                                   type="number"
                                   min={0}
-                                  placeholder="days"
-                                  className="w-20 border border-slate-200 rounded px-2 py-1 text-center"
-                                  value={cell?.lead_time_days ?? ''}
+                                  max={100}
+                                  className="border border-slate-300 rounded px-2 py-1 text-center"
+                                  value={pct}
                                   onChange={(e) => {
-                                    const v = parseInt(e.target.value)
-                                    setDraft(p.id, (x) => {
-                                      const next = { ...x, matrix: { ...x.matrix } }
-                                      if (!v || v <= 0) delete next.matrix[k]
-                                      else
-                                        next.matrix[k] = {
-                                          year: y,
-                                          quarter: q,
-                                          lead_time_days: v,
-                                        }
-                                      return next
-                                    })
+                                    const allocation_pct = Math.max(
+                                      0,
+                                      Math.min(100, parseInt(e.target.value, 10) || 0),
+                                    )
+                                    setDraft(p.id, (x) => ({
+                                      ...x,
+                                      allocationMatrix: {
+                                        ...x.allocationMatrix,
+                                        [row.key]: {
+                                          factory_id:
+                                            x.allocationMatrix[row.key]?.factory_id ??
+                                            selectedFactory,
+                                          allocation_pct,
+                                        },
+                                      },
+                                    }))
                                   }}
                                 />
-                              </td>
+                                <button
+                                  type="button"
+                                  className="text-xs text-slate-400 hover:text-rose-600"
+                                  onClick={() =>
+                                    setDraft(p.id, (x) => {
+                                      const next = { ...x.allocationMatrix }
+                                      delete next[row.key]
+                                      return { ...x, allocationMatrix: next }
+                                    })
+                                  }
+                                >
+                                  clear
+                                </button>
+                              </div>
                             )
                           })}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                        </>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
           )
         })}
-        <div className="flex items-center gap-2 px-3 py-2 bg-slate-50">
+        <div className="flex items-center gap-2 px-3 py-2 bg-slate-50 border-t border-slate-200">
           <input
-            className="flex-1 border border-slate-300 rounded px-2 py-1 text-sm"
+            autoFocus
+            aria-label="New product name"
+            className="flex-1 border border-indigo-300 rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200"
             placeholder="New product name…"
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                void handleCreate()
+              }
+            }}
           />
           <button
+            type="button"
             className="inline-flex items-center gap-1 px-3 py-1 bg-indigo-600 text-white text-sm rounded hover:bg-indigo-700"
             onClick={handleCreate}
           >

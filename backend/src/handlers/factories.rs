@@ -45,6 +45,7 @@ async fn as_with_bays(pool: &Pool, f: Factory) -> AppResult<FactoryWithBayCounts
         scenario_id: f.scenario_id,
         name: f.name,
         bays: f.bays,
+        changeover_days: f.changeover_days,
         bay_counts,
     })
 }
@@ -56,7 +57,7 @@ async fn list_factories(
 ) -> AppResult<HttpResponse> {
     let scenario_id = path.into_inner();
     let rows = sqlx::query_as::<_, Factory>(
-        "SELECT id, scenario_id, name, bays FROM factory WHERE scenario_id = ? ORDER BY name",
+        "SELECT id, scenario_id, name, bays, changeover_days FROM factory WHERE scenario_id = ? ORDER BY name",
     )
     .bind(&scenario_id)
     .fetch_all(pool.get_ref())
@@ -82,15 +83,19 @@ async fn create_factory(
     if body.bays < 0 {
         return Err(AppError::BadRequest("bays must be >= 0".into()));
     }
+    if body.changeover_days < 0 {
+        return Err(AppError::BadRequest("changeover_days must be >= 0".into()));
+    }
     validate_bay_counts(&body.bay_counts)?;
     let id = new_id();
 
     let mut tx = pool.begin().await?;
-    sqlx::query("INSERT INTO factory (id, scenario_id, name, bays) VALUES (?, ?, ?, ?)")
+    sqlx::query("INSERT INTO factory (id, scenario_id, name, bays, changeover_days) VALUES (?, ?, ?, ?, ?)")
         .bind(&id)
         .bind(&scenario_id)
         .bind(name)
         .bind(body.bays)
+        .bind(body.changeover_days)
         .execute(&mut *tx)
         .await?;
     for c in &body.bay_counts {
@@ -106,7 +111,7 @@ async fn create_factory(
     tx.commit().await?;
 
     let row = sqlx::query_as::<_, Factory>(
-        "SELECT id, scenario_id, name, bays FROM factory WHERE id = ?",
+        "SELECT id, scenario_id, name, bays, changeover_days FROM factory WHERE id = ?",
     )
     .bind(&id)
     .fetch_one(pool.get_ref())
@@ -128,12 +133,16 @@ async fn update_factory(
     if body.bays < 0 {
         return Err(AppError::BadRequest("bays must be >= 0".into()));
     }
+    if body.changeover_days < 0 {
+        return Err(AppError::BadRequest("changeover_days must be >= 0".into()));
+    }
     validate_bay_counts(&body.bay_counts)?;
 
     let mut tx = pool.begin().await?;
-    let res = sqlx::query("UPDATE factory SET name = ?, bays = ? WHERE id = ?")
+    let res = sqlx::query("UPDATE factory SET name = ?, bays = ?, changeover_days = ? WHERE id = ?")
         .bind(name)
         .bind(body.bays)
+        .bind(body.changeover_days)
         .bind(&id)
         .execute(&mut *tx)
         .await?;
@@ -159,7 +168,7 @@ async fn update_factory(
     tx.commit().await?;
 
     let row = sqlx::query_as::<_, Factory>(
-        "SELECT id, scenario_id, name, bays FROM factory WHERE id = ?",
+        "SELECT id, scenario_id, name, bays, changeover_days FROM factory WHERE id = ?",
     )
     .bind(&id)
     .fetch_one(pool.get_ref())

@@ -6,7 +6,10 @@ import type {
   Demand,
   PeriodType,
   SpreadMode,
+  SerialMode,
   RunResult,
+  AgentConversation,
+  AgentMessage,
 } from '../types'
 
 const client = axios.create({
@@ -79,10 +82,11 @@ export async function createFactory(
   scenarioId: string,
   name: string,
   bays: number,
+  changeover_days: number,
   bay_counts: BayCountInput[] = [],
 ): Promise<Factory> {
   return client
-    .post(`/api/scenarios/${scenarioId}/factories`, { name, bays, bay_counts })
+    .post(`/api/scenarios/${scenarioId}/factories`, { name, bays, changeover_days, bay_counts })
     .then((r) => r.data)
     .catch(rethrow)
 }
@@ -91,10 +95,11 @@ export async function updateFactory(
   id: string,
   name: string,
   bays: number,
+  changeover_days: number,
   bay_counts: BayCountInput[] = [],
 ): Promise<Factory> {
   return client
-    .put(`/api/factories/${id}`, { name, bays, bay_counts })
+    .put(`/api/factories/${id}`, { name, bays, changeover_days, bay_counts })
     .then((r) => r.data)
     .catch(rethrow)
 }
@@ -110,6 +115,20 @@ export interface LeadTimeInput {
   lead_time_days: number
 }
 
+export interface FactoryLeadTimeInput {
+  factory_id: string
+  year: number
+  quarter: number
+  lead_time_days: number
+}
+
+export interface FactoryAllocationInput {
+  factory_id: string
+  year: number
+  quarter: number
+  allocation_pct: number
+}
+
 export async function listProducts(scenarioId: string): Promise<Product[]> {
   return client.get(`/api/scenarios/${scenarioId}/products`).then((r) => r.data).catch(rethrow)
 }
@@ -118,9 +137,16 @@ export async function createProduct(
   scenarioId: string,
   name: string,
   lead_times: LeadTimeInput[],
+  factory_lead_times: FactoryLeadTimeInput[] = [],
+  factory_allocations: FactoryAllocationInput[] = [],
 ): Promise<Product> {
   return client
-    .post(`/api/scenarios/${scenarioId}/products`, { name, lead_times })
+    .post(`/api/scenarios/${scenarioId}/products`, {
+      name,
+      lead_times,
+      factory_lead_times,
+      factory_allocations,
+    })
     .then((r) => r.data)
     .catch(rethrow)
 }
@@ -129,8 +155,13 @@ export async function updateProduct(
   id: string,
   name: string,
   lead_times: LeadTimeInput[],
+  factory_lead_times: FactoryLeadTimeInput[] = [],
+  factory_allocations: FactoryAllocationInput[] = [],
 ): Promise<Product> {
-  return client.put(`/api/products/${id}`, { name, lead_times }).then((r) => r.data).catch(rethrow)
+  return client
+    .put(`/api/products/${id}`, { name, lead_times, factory_lead_times, factory_allocations })
+    .then((r) => r.data)
+    .catch(rethrow)
 }
 
 export async function deleteProduct(id: string): Promise<void> {
@@ -145,6 +176,9 @@ export interface DemandInput {
   period_index: number
   quantity: number
   spread_mode: SpreadMode
+  serial_mode?: SerialMode
+  serial_start?: string | null
+  serial_list?: string | null
 }
 
 export async function listDemand(scenarioId: string): Promise<Demand[]> {
@@ -167,8 +201,17 @@ export async function deleteDemand(id: string): Promise<void> {
 }
 
 // ---------- run (Phase 2) ----------
-export async function runScenario(scenarioId: string): Promise<RunResult> {
-  return client.post(`/api/scenarios/${scenarioId}/run`).then((r) => r.data).catch(rethrow)
+export type OptimizeMode = 'balance' | 'utilization'
+
+export async function runScenario(
+  scenarioId: string,
+  optimize: OptimizeMode = 'balance',
+): Promise<RunResult> {
+  const params = optimize === 'utilization' ? { optimize: 'utilization' } : {}
+  return client
+    .post(`/api/scenarios/${scenarioId}/run`, null, { params })
+    .then((r) => r.data)
+    .catch(rethrow)
 }
 
 // ---------- import / export (Phase 5) ----------
@@ -198,4 +241,110 @@ export function exportRunCsvUrl(runId: string): string {
 
 export function exportRunXlsxUrl(runId: string): string {
   return `/api/runs/${runId}/export.xlsx`
+}
+
+// ---------- agent (Devin-powered scheduling chat) ----------
+export async function listConversations(scenarioId: string): Promise<AgentConversation[]> {
+  return client
+    .get('/api/agent/conversations', { params: { scenario_id: scenarioId } })
+    .then((r) => r.data)
+    .catch(rethrow)
+}
+
+export async function getConversationMessages(convId: string): Promise<AgentMessage[]> {
+  return client
+    .get(`/api/agent/conversations/${convId}/messages`)
+    .then((r) => r.data)
+    .catch(rethrow)
+}
+
+export async function deleteConversation(convId: string): Promise<void> {
+  return client
+    .delete(`/api/agent/conversations/${convId}`)
+    .then(() => undefined)
+    .catch(rethrow)
+}
+
+/**
+ * Stream a chat turn over SSE. Uses fetch + ReadableStream (axios can't stream).
+ * Calls `onChunk` for each response line, `onConversation` once with the
+ * conversation id, `onError` on a fatal error, and `onDone` when complete.
+ * Returns an AbortController so callers can cancel an in-flight turn.
+ */
+export function sendAgentMessage(
+  params: {
+    scenarioId: string
+    message: string
+    conversationId: string | null
+  },
+  handlers: {
+    onConversation?: (id: string) => void
+    onChunk: (line: string) => void
+    onError: (message: string) => void
+    onDone: () => void
+  },
+): AbortController {
+  const controller = new AbortController()
+
+  void (async () => {
+    try {
+      const res = await fetch('/api/agent/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          scenario_id: params.scenarioId,
+          message: params.message,
+          conversation_id: params.conversationId,
+        }),
+        signal: controller.signal,
+      })
+
+      if (!res.ok || !res.body) {
+        handlers.onError(`HTTP ${res.status}`)
+        return
+      }
+
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      // SSE events are separated by a blank line; each event has `data: ` lines.
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+
+        let sep: number
+        while ((sep = buffer.indexOf('\n\n')) !== -1) {
+          const rawEvent = buffer.slice(0, sep)
+          buffer = buffer.slice(sep + 2)
+          // An SSE event may have multiple `data:` lines; join them with \n.
+          const dataLines = rawEvent
+            .split('\n')
+            .filter((l) => l.startsWith('data:'))
+            .map((l) => l.slice(l.startsWith('data: ') ? 6 : 5))
+          if (dataLines.length === 0) continue
+          const data = dataLines.join('\n')
+
+          if (data.startsWith('[CONV] ')) {
+            handlers.onConversation?.(data.slice(7).trim())
+          } else if (data === '[DONE]') {
+            handlers.onDone()
+            return
+          } else if (data.startsWith('[ERROR]')) {
+            handlers.onError(data.slice(7).trim())
+            return
+          } else {
+            handlers.onChunk(data)
+          }
+        }
+      }
+      handlers.onDone()
+    } catch (e: unknown) {
+      if ((e as { name?: string }).name === 'AbortError') return
+      handlers.onError((e as { message?: string }).message ?? 'stream failed')
+    }
+  })()
+
+  return controller
 }

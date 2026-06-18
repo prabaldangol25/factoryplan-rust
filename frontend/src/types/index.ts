@@ -19,6 +19,7 @@ export interface Factory {
   scenario_id: string
   name: string
   bays: number
+  changeover_days: number
   bay_counts: BayCountRow[]
 }
 
@@ -30,15 +31,36 @@ export interface LeadTimeRow {
   lead_time_days: number
 }
 
+export interface FactoryLeadTimeRow {
+  id: string
+  product_id: string
+  factory_id: string
+  year: number
+  quarter: number
+  lead_time_days: number
+}
+
+export interface FactoryAllocationRow {
+  id: string
+  product_id: string
+  factory_id: string
+  year: number
+  quarter: number
+  allocation_pct: number
+}
+
 export interface Product {
   id: string
   scenario_id: string
   name: string
   lead_times: LeadTimeRow[]
+  factory_lead_times: FactoryLeadTimeRow[]
+  factory_allocations: FactoryAllocationRow[]
 }
 
 export type PeriodType = 'month' | 'quarter'
 export type SpreadMode = 'even' | 'start' | 'end'
+export type SerialMode = 'none' | 'sequence' | 'list'
 
 export interface Demand {
   id: string
@@ -49,6 +71,9 @@ export interface Demand {
   period_index: number
   quantity: number
   spread_mode: SpreadMode
+  serial_mode: SerialMode
+  serial_start: string | null
+  serial_list: string | null
 }
 
 export interface ScheduleRun {
@@ -57,7 +82,16 @@ export interface ScheduleRun {
   run_at: string
   total_demand: number
   shipped_on_time: number
+  shipped_late: number
   unshippable: number
+}
+
+export interface QuarterMiss {
+  id: string
+  run_id: string
+  year: number
+  quarter: number
+  missed_count: number
 }
 
 export interface ScheduledUnit {
@@ -70,6 +104,9 @@ export interface ScheduledUnit {
   required_start: string
   due_date: string
   status: 'shipped' | 'unshippable'
+  serial: string | null
+  orig_due_date: string | null
+  is_late: boolean
 }
 
 export interface PerProductLtTarget {
@@ -93,10 +130,53 @@ export interface Recommendation {
   bays_needed: BaysNeededRec | null
   uniform_lt_pct: UniformLtPctRec | null
   per_product_lt: PerProductLtTarget[]
+  quarter_fixes: QuarterFixRec[]
+}
+
+export interface QuarterFixRec {
+  year: number
+  quarter: number
+  missed_count: number
+  bays_to_add: number | null
+  suggested_factory_id: string | null
+  suggested_factory_name: string | null
+  ct_reduction_pct: number | null
+  ct_capacity_bound: boolean
 }
 
 export interface RunResult {
   run: ScheduleRun
   units: ScheduledUnit[]
   recommendation: Recommendation
+  quarter_misses: QuarterMiss[]
+  alternatives?: RunAlternative[]
+}
+
+export interface RunAlternative {
+  kind: string
+  label: string
+  description: string
+  total_demand: number
+  shipped_on_time: number
+  shipped_late: number
+  unshippable: number
+  units: ScheduledUnit[]
+}
+
+// ---------- Agent (Devin-powered scheduling chat) ----------
+
+export interface AgentConversation {
+  id: string
+  scenario_id: string
+  title: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface AgentMessage {
+  id: string
+  conversation_id: string
+  role: 'user' | 'assistant' | 'system'
+  content: string
+  created_at: string
 }

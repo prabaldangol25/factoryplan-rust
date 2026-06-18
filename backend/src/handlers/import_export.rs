@@ -217,7 +217,7 @@ async fn load_run(
     run_id: &str,
 ) -> AppResult<(ScheduleRun, Vec<ScheduledUnit>, RecommendationOut)> {
     let run = sqlx::query_as::<_, ScheduleRun>(
-        "SELECT id, scenario_id, run_at, total_demand, shipped_on_time, unshippable FROM schedule_run WHERE id = ?",
+        "SELECT id, scenario_id, run_at, total_demand, shipped_on_time, shipped_late, unshippable FROM schedule_run WHERE id = ?",
     )
     .bind(run_id)
     .fetch_optional(pool)
@@ -225,7 +225,7 @@ async fn load_run(
     .ok_or_else(|| AppError::NotFound(format!("run {run_id}")))?;
 
     let units = sqlx::query_as::<_, ScheduledUnit>(
-        "SELECT id, run_id, demand_id, product_id, factory_id, bay_index, required_start, due_date, status FROM scheduled_unit WHERE run_id = ? ORDER BY due_date",
+        "SELECT id, run_id, demand_id, product_id, factory_id, bay_index, required_start, due_date, status, serial, orig_due_date, is_late FROM scheduled_unit WHERE run_id = ? ORDER BY due_date",
     )
     .bind(run_id)
     .fetch_all(pool)
@@ -271,6 +271,7 @@ async fn export_run_csv(
 
     let mut wtr = csv::Writer::from_writer(vec![]);
     wtr.write_record([
+        "serial",
         "demand_id",
         "product",
         "factory",
@@ -278,10 +279,13 @@ async fn export_run_csv(
         "required_start",
         "due_date",
         "status",
+        "late",
+        "orig_due_date",
     ])
     .map_err(|e| AppError::Internal(format!("csv write: {e}")))?;
     for u in &units {
         wtr.write_record([
+            u.serial.as_deref().unwrap_or(""),
             u.demand_id.as_str(),
             product_names.get(&u.product_id).map(String::as_str).unwrap_or("(unknown)"),
             u.factory_id
@@ -292,6 +296,8 @@ async fn export_run_csv(
             u.required_start.as_str(),
             u.due_date.as_str(),
             u.status.as_str(),
+            if u.is_late { "yes" } else { "" },
+            u.orig_due_date.as_deref().unwrap_or(""),
         ])
         .map_err(|e| AppError::Internal(format!("csv write: {e}")))?;
     }
@@ -337,15 +343,25 @@ async fn export_run_xlsx(
     // Sheet 2: Units
     {
         let s = wb.add_worksheet().set_name("Units").map_err(xerr)?;
-        let header_row = ["Product", "Factory", "Bay", "Required start", "Due date", "Status"];
+        let header_row = [
+            "Serial",
+            "Product",
+            "Factory",
+            "Bay",
+            "Required start",
+            "Due date",
+            "Status",
+            "Late",
+        ];
         for (i, h) in header_row.iter().enumerate() {
             s.write_string(0, i as u16, *h).map_err(xerr)?;
         }
         for (row, u) in units.iter().enumerate() {
             let r = (row + 1) as u32;
+            s.write_string(r, 0, u.serial.as_deref().unwrap_or("")).map_err(xerr)?;
             s.write_string(
                 r,
-                0,
+                1,
                 product_names
                     .get(&u.product_id)
                     .map(String::as_str)
@@ -354,7 +370,7 @@ async fn export_run_xlsx(
             .map_err(xerr)?;
             s.write_string(
                 r,
-                1,
+                2,
                 u.factory_id
                     .as_deref()
                     .and_then(|f| factory_names.get(f).map(String::as_str))
@@ -362,11 +378,12 @@ async fn export_run_xlsx(
             )
             .map_err(xerr)?;
             if let Some(b) = u.bay_index {
-                s.write_number(r, 2, (b + 1) as f64).map_err(xerr)?;
+                s.write_number(r, 3, (b + 1) as f64).map_err(xerr)?;
             }
-            s.write_string(r, 3, &u.required_start).map_err(xerr)?;
-            s.write_string(r, 4, &u.due_date).map_err(xerr)?;
-            s.write_string(r, 5, &u.status).map_err(xerr)?;
+            s.write_string(r, 4, &u.required_start).map_err(xerr)?;
+            s.write_string(r, 5, &u.due_date).map_err(xerr)?;
+            s.write_string(r, 6, &u.status).map_err(xerr)?;
+            s.write_string(r, 7, if u.is_late { "yes" } else { "" }).map_err(xerr)?;
         }
     }
 
@@ -436,7 +453,7 @@ async fn load_name_maps(pool: &Pool) -> AppResult<(HashMap<String, String>, Hash
         .fetch_all(pool)
         .await?;
     let factories =
-        sqlx::query_as::<_, Factory>("SELECT id, scenario_id, name, bays FROM factory")
+        sqlx::query_as::<_, Factory>("SELECT id, scenario_id, name, bays, changeover_days FROM factory")
             .fetch_all(pool)
             .await?;
     let mut pm = HashMap::new();

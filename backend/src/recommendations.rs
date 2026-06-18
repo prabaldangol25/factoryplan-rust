@@ -8,7 +8,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::scheduling::{run_schedule, run_schedule_with_lt, FactoryInput, ScheduleInput, ScheduleOutput};
+use crate::scheduling::{
+    run_schedule_mode, run_schedule_with_lt_mode, BayAssignment, FactoryInput, ScheduleInput,
+    ScheduleOutput,
+};
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct RecommendationOut {
@@ -16,6 +19,8 @@ pub struct RecommendationOut {
     pub uniform_lt_pct: Option<UniformLtPctRec>,
     #[serde(default)]
     pub per_product_lt: Vec<PerProductLtTarget>,
+    #[serde(default)]
+    pub quarter_fixes: Vec<QuarterFixRec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +46,18 @@ pub struct PerProductLtTarget {
     pub target_lead_time_days: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuarterFixRec {
+    pub year: i64,
+    pub quarter: i64,
+    pub missed_count: i64,
+    pub bays_to_add: Option<i64>,
+    pub suggested_factory_id: Option<String>,
+    pub suggested_factory_name: Option<String>,
+    pub ct_reduction_pct: Option<f64>,
+    pub ct_capacity_bound: bool,
+}
+
 const MAX_BAYS_TO_ADD: i64 = 256;
 const MAX_PCT_ITER: u32 = 24;
 
@@ -48,15 +65,18 @@ const MAX_PCT_ITER: u32 = 24;
 pub fn compute_recommendations(
     input: &ScheduleInput,
     failed_output: &ScheduleOutput,
+    mode: BayAssignment,
 ) -> RecommendationOut {
-    let bays_needed = compute_bays_needed(input, failed_output);
-    let uniform_lt_pct = compute_uniform_lt_pct(input);
-    let per_product_lt = compute_per_product_lt(input);
+    let bays_needed = compute_bays_needed(input, failed_output, mode);
+    let uniform_lt_pct = compute_uniform_lt_pct(input, mode);
+    let per_product_lt = compute_per_product_lt(input, mode);
+    let quarter_fixes = compute_quarter_fixes(failed_output);
 
     RecommendationOut {
         bays_needed,
         uniform_lt_pct,
         per_product_lt,
+        quarter_fixes,
     }
 }
 
@@ -81,8 +101,9 @@ fn pick_busiest_factory(input: &ScheduleInput, output: &ScheduleOutput) -> Optio
 fn compute_bays_needed(
     input: &ScheduleInput,
     failed_output: &ScheduleOutput,
+    mode: BayAssignment,
 ) -> Option<BaysNeededRec> {
-    if failed_output.unshippable == 0 {
+    if failed_output.not_on_time() == 0 {
         return None;
     }
     let target_factory = pick_busiest_factory(input, failed_output)?;
@@ -98,8 +119,8 @@ fn compute_bays_needed(
                 break;
             }
         }
-        let out = run_schedule(&trial);
-        if out.unshippable == 0 {
+        let out = run_schedule_mode(&trial, mode);
+        if out.not_on_time() == 0 {
             return Some(BaysNeededRec {
                 bays_to_add: n,
                 suggested_factory_id: Some(target_factory.id),
@@ -115,25 +136,56 @@ fn compute_bays_needed(
     })
 }
 
+// ---------- Per-quarter marginal fixes ----------
+
+fn compute_quarter_fixes(
+    failed_output: &ScheduleOutput,
+) -> Vec<QuarterFixRec> {
+    let mut misses = failed_output.quarter_misses.clone();
+    misses.sort_by_key(|m| (m.year, m.quarter));
+    misses
+        .into_iter()
+        .filter(|m| m.count > 0)
+        .map(|m| {
+            QuarterFixRec {
+                year: m.year,
+                quarter: m.quarter,
+                missed_count: m.count,
+                bays_to_add: None,
+                suggested_factory_id: None,
+                suggested_factory_name: None,
+                ct_reduction_pct: None,
+                ct_capacity_bound: false,
+            }
+        })
+        .collect()
+}
+
 // ---------- 2. Uniform LT % reduction ----------
 
-fn schedule_with_uniform_scale(input: &ScheduleInput, scale: f64) -> ScheduleOutput {
-    run_schedule_with_lt(input, |_pid, lt| {
-        ((lt as f64) * scale).round().max(1.0) as i64
-    })
+fn schedule_with_uniform_scale(
+    input: &ScheduleInput,
+    scale: f64,
+    mode: BayAssignment,
+) -> ScheduleOutput {
+    run_schedule_with_lt_mode(
+        input,
+        |_pid, lt| ((lt as f64) * scale).round().max(1.0) as i64,
+        mode,
+    )
 }
 
 /// Returns minimum percent reduction (e.g. 12.5 = reduce all LTs by 12.5%) such
 /// that all demand ships on time. Binary search over scale ∈ [low, 1.0].
-fn compute_uniform_lt_pct(input: &ScheduleInput) -> Option<UniformLtPctRec> {
+fn compute_uniform_lt_pct(input: &ScheduleInput, mode: BayAssignment) -> Option<UniformLtPctRec> {
     // Check that scale=1.0 actually fails (otherwise no rec needed)
-    let baseline = run_schedule(input);
-    if baseline.unshippable == 0 {
+    let baseline = run_schedule_mode(input, mode);
+    if baseline.not_on_time() == 0 {
         return None;
     }
     // Check that even scale=0.01 doesn't help (impossible-bays case)
-    let extreme = schedule_with_uniform_scale(input, 0.01);
-    if extreme.unshippable > 0 {
+    let extreme = schedule_with_uniform_scale(input, 0.01, mode);
+    if extreme.not_on_time() > 0 {
         // Even with effectively-zero LTs we still can't ship — capacity is the
         // bottleneck, not lead time. Don't return a misleading recommendation.
         return None;
@@ -144,8 +196,8 @@ fn compute_uniform_lt_pct(input: &ScheduleInput) -> Option<UniformLtPctRec> {
     let mut best = lo;
     for _ in 0..MAX_PCT_ITER {
         let mid = (lo + hi) / 2.0;
-        let out = schedule_with_uniform_scale(input, mid);
-        if out.unshippable == 0 {
+        let out = schedule_with_uniform_scale(input, mid, mode);
+        if out.not_on_time() == 0 {
             best = mid; // works at mid
             lo = mid;   // try a larger (= less aggressive cut)
         } else {
@@ -161,19 +213,24 @@ fn compute_uniform_lt_pct(input: &ScheduleInput) -> Option<UniformLtPctRec> {
 fn schedule_with_product_scales(
     input: &ScheduleInput,
     scales: &HashMap<String, f64>,
+    mode: BayAssignment,
 ) -> ScheduleOutput {
-    run_schedule_with_lt(input, |pid, lt| {
-        let s = scales.get(pid).copied().unwrap_or(1.0);
-        ((lt as f64) * s).round().max(1.0) as i64
-    })
+    run_schedule_with_lt_mode(
+        input,
+        |pid, lt| {
+            let s = scales.get(pid).copied().unwrap_or(1.0);
+            ((lt as f64) * s).round().max(1.0) as i64
+        },
+        mode,
+    )
 }
 
 /// For each product, find min scale ∈ (0, 1] holding others at their best-known
 /// scale such that all demand ships on time. Greedy coordinate descent — not
 /// globally optimal but fast and useful in practice.
-fn compute_per_product_lt(input: &ScheduleInput) -> Vec<PerProductLtTarget> {
-    let baseline = run_schedule(input);
-    if baseline.unshippable == 0 {
+fn compute_per_product_lt(input: &ScheduleInput, mode: BayAssignment) -> Vec<PerProductLtTarget> {
+    let baseline = run_schedule_mode(input, mode);
+    if baseline.not_on_time() == 0 {
         return vec![];
     }
 
@@ -196,8 +253,8 @@ fn compute_per_product_lt(input: &ScheduleInput) -> Vec<PerProductLtTarget> {
 
     for pid in order {
         // Confirm shortfall persists; if it doesn't, this product needn't change
-        let current = schedule_with_product_scales(input, &scales);
-        if current.unshippable == 0 {
+        let current = schedule_with_product_scales(input, &scales, mode);
+        if current.not_on_time() == 0 {
             break;
         }
 
@@ -210,8 +267,8 @@ fn compute_per_product_lt(input: &ScheduleInput) -> Vec<PerProductLtTarget> {
             let mid = (lo + hi) / 2.0;
             let mut trial = scales.clone();
             trial.insert(pid.to_string(), mid);
-            let out = schedule_with_product_scales(input, &trial);
-            if out.unshippable == 0 {
+            let out = schedule_with_product_scales(input, &trial, mode);
+            if out.not_on_time() == 0 {
                 best = mid;
                 lo = mid; // try less aggressive
                 found_feasible = true;
@@ -266,6 +323,7 @@ mod tests {
                 id: "f1".into(),
                 name: "F1".into(),
                 bays: 1,
+                changeover_days: 0,
                 bay_counts_by_quarter: vec![],
             }],
             products: vec![ProductInput {
@@ -276,6 +334,8 @@ mod tests {
                     quarter: 3,
                     lead_time_days: 5,
                 }],
+                factory_lead_times: vec![],
+                factory_allocations: vec![],
             }],
             demand: vec![DemandInput {
                 id: "d1".into(),
@@ -297,6 +357,7 @@ mod tests {
                 id: "f1".into(),
                 name: "F1".into(),
                 bays: 1,
+                changeover_days: 0,
                 bay_counts_by_quarter: vec![],
             }],
             products: vec![ProductInput {
@@ -307,6 +368,8 @@ mod tests {
                     quarter: 3,
                     lead_time_days: 60,
                 }],
+                factory_lead_times: vec![],
+                factory_allocations: vec![],
             }],
             demand: vec![DemandInput {
                 id: "d1".into(),
@@ -323,9 +386,10 @@ mod tests {
     #[test]
     fn bays_needed_capacity_short() {
         let s = scenario_capacity_short();
-        let out = run_schedule(&s);
-        assert!(out.unshippable > 0);
-        let r = compute_bays_needed(&s, &out).expect("expected a rec");
+        let m = BayAssignment::BalanceLoad;
+        let out = run_schedule_mode(&s, m);
+        assert!(out.not_on_time() > 0);
+        let r = compute_bays_needed(&s, &out, m).expect("expected a rec");
         assert!(r.bays_to_add >= 2, "need at least 2 more bays; got {}", r.bays_to_add);
         assert_eq!(r.suggested_factory_id.as_deref(), Some("f1"));
     }
@@ -333,9 +397,10 @@ mod tests {
     #[test]
     fn uniform_lt_pct_lt_too_long() {
         let s = scenario_lt_too_long();
-        let out = run_schedule(&s);
-        assert!(out.unshippable > 0);
-        let r = compute_uniform_lt_pct(&s).expect("expected a rec");
+        let m = BayAssignment::BalanceLoad;
+        let out = run_schedule_mode(&s, m);
+        assert!(out.not_on_time() > 0);
+        let r = compute_uniform_lt_pct(&s, m).expect("expected a rec");
         assert!(r.reduction_pct > 0.0 && r.reduction_pct < 100.0);
     }
 
@@ -343,14 +408,14 @@ mod tests {
     fn uniform_lt_pct_no_rec_when_capacity_bound() {
         // Capacity-bound: reducing LT doesn't help, so no rec.
         let s = scenario_capacity_short();
-        let r = compute_uniform_lt_pct(&s);
+        let r = compute_uniform_lt_pct(&s, BayAssignment::BalanceLoad);
         assert!(r.is_none(), "should not recommend LT cut when capacity is bottleneck");
     }
 
     #[test]
     fn per_product_lt_targets_when_lt_too_long() {
         let s = scenario_lt_too_long();
-        let out = compute_per_product_lt(&s);
+        let out = compute_per_product_lt(&s, BayAssignment::BalanceLoad);
         assert!(!out.is_empty(), "expected at least one product LT target");
         let r = &out[0];
         assert_eq!(r.product_id, "p1");
@@ -360,8 +425,9 @@ mod tests {
     #[test]
     fn compute_all_returns_three() {
         let s = scenario_lt_too_long();
-        let out = run_schedule(&s);
-        let rec = compute_recommendations(&s, &out);
+        let m = BayAssignment::BalanceLoad;
+        let out = run_schedule_mode(&s, m);
+        let rec = compute_recommendations(&s, &out, m);
         assert!(rec.bays_needed.is_some());
         assert!(rec.uniform_lt_pct.is_some());
         assert!(!rec.per_product_lt.is_empty());
