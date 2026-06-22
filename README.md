@@ -170,8 +170,9 @@ streams its response back over SSE. If `devin` is missing, the chat returns a
 clear error and the rest of the app is unaffected.
 
 The frontend reads no env vars in dev — Vite proxies `/api/*` to
-`http://127.0.0.1:8080`. For a production build, ensure the frontend is served
-from the same origin as the backend, or update the proxy / CORS settings.
+`http://127.0.0.1:8080`. For a production build served from a different origin
+than the backend (for example Vercel frontend + separately hosted API), set
+`VITE_API_BASE_URL` to the backend origin, such as `https://api.example.com`.
 
 ---
 

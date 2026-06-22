@@ -12,8 +12,11 @@ import type {
   AgentMessage,
 } from '../types'
 
+const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '')
+const apiUrl = (path: string) => `${apiBaseUrl}${path}`
+
 const client = axios.create({
-  baseURL: '/',
+  baseURL: apiBaseUrl || '/',
   headers: { 'Content-Type': 'application/json' },
 })
 
@@ -228,7 +231,7 @@ export async function importDemandExcel(
   const form = new FormData()
   form.append('file', file)
   return axios
-    .post(`/api/scenarios/${scenarioId}/demand/import-excel`, form, {
+    .post(apiUrl(`/api/scenarios/${scenarioId}/demand/import-excel`), form, {
       headers: { 'Content-Type': 'multipart/form-data' },
     })
     .then((r) => r.data)
@@ -236,11 +239,11 @@ export async function importDemandExcel(
 }
 
 export function exportRunCsvUrl(runId: string): string {
-  return `/api/runs/${runId}/export.csv`
+  return apiUrl(`/api/runs/${runId}/export.csv`)
 }
 
 export function exportRunXlsxUrl(runId: string): string {
-  return `/api/runs/${runId}/export.xlsx`
+  return apiUrl(`/api/runs/${runId}/export.xlsx`)
 }
 
 // ---------- agent (Devin-powered scheduling chat) ----------
@@ -288,7 +291,7 @@ export function sendAgentMessage(
 
   void (async () => {
     try {
-      const res = await fetch('/api/agent/chat', {
+      const res = await fetch(apiUrl('/api/agent/chat'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
